@@ -1,0 +1,15 @@
+# input_counts: 
+# input_gene_names: 
+# training_metadata: 
+# genes_to_use: 
+# out_path: 
+batch_size: 256
+n_epochs: 150
+n_hidden: 256
+n_layers: 1
+residual: True
+init_dropout: 0.3
+balance_classes: True
+upper_group: tissue
+lower_group: cell_ontology_class
+weight_decay: 0.000001
