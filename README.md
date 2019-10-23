@@ -4,6 +4,19 @@
 
 `scNym` is a neural network model for predicting cell types from single cell profiling data (e.g. scRNA-seq) and deriving cell type representations from these models. While cell type classification is the main use case, these models can map single cell profiles to arbitrary output classes (e.g. experimental conditions).
 
+We developed `scNym` as part of the [Murine Aging Cell Atlas](https://mca.research.calicolabs.com/). If you find `scNym` useful in your work, [please cite our preprint](https://www.biorxiv.org/content/10.1101/657726v1).
+
+```
+A murine aging cell atlas reveals cell identity and tissue-specific trajectories of aging
+Jacob C. Kimmel, Lolita Penland, Nimrod D. Rubinstein, David G. Hendrickson, David R. Kelley, Adam Z. Rosenthal
+bioRxiv 657726; doi: https://doi.org/10.1101/657726
+```
+
+If you have any questions or suggestions, please feel free to email me:
+
+Jacob C. Kimmel  
+[jacob@calicolabs.com](mailto:jacob@calicolabs.com)  
+
 ## Model
 
 The `scNym` model is a simple neural network leveraging modern best practices in architecture design. The model has a user configurable number of hidden layers, each with a user configurable number of parameters. Raw inputs are first processed with a dropout layer to simulate technical noise commonly observed in single cell profiling experiments. Subsequent hidden layers leverage the Residual Block design popularized in [Residual Networks](https://arxiv.org/abs/1512.03385) and are paired with ReLU activation, Batch Normalization, and Dropout layers.
