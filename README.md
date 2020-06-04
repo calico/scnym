@@ -51,9 +51,9 @@ You can even analyze data on your cell phone!
 This tutorial demonstrates how to train a semi-supervised `scNym` model using a pre-prepared cell atlas as a training data set and a new data set as the target.
 You can upload your own data through Google Drive to classify cell types in a new experiment.
 
-[**Semi-supervised Training**](https://colab.research.google.com/drive/1tu1O-nGne7Fi9RKh1ERpNBFnF7dzl93_)
+[**Semi-supervised Training**](https://colab.research.google.com/drive/1-xEwHXq4INTSyqWo8RMT_pzCMZXNalex?usp=sharing)
 
-<a href="https://colab.research.google.com/drive/1tu1O-nGne7Fi9RKh1ERpNBFnF7dzl93_"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
+<a href="https://colab.research.google.com/drive/1-xEwHXq4INTSyqWo8RMT_pzCMZXNalex?usp=sharing"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
 
 ### (2) Classifying cell types with pre-trained scNym models
 
@@ -62,15 +62,16 @@ These predictions are less accurate than those provided by semi-supervised train
 
 We provide pre-trained weights for mouse, rat, and human cell atlases.
 
-[**Classification with Pre-trained Models**](https://colab.research.google.com/drive/1H3k-QNrqmJyzu8teTiwSSHBTpUwcg7bs)
+[**Classification with Pre-trained Models**](https://colab.research.google.com/drive/1GxPG8u6SG42f2kkDgG45wWfGqyJLN2xo?usp=sharing)
 
-<a href="https://colab.research.google.com/drive/1H3k-QNrqmJyzu8teTiwSSHBTpUwcg7bs"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
+<a href="https://colab.research.google.com/drive/1GxPG8u6SG42f2kkDgG45wWfGqyJLN2xo?usp=sharing"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
 
 ## Installation
 
 First, clone the repository:
 
-We recommend creating a virtual environment for use with `scNym`. This is easily accomplished using `virtualenv` or `conda`.
+We recommend creating a virtual environment for use with `scNym`. 
+This is easily accomplished using `virtualenv` or `conda`.
 
 ```bash
 $ virtualenv scnym_env
