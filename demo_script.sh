@@ -43,6 +43,7 @@ scnym train_tissue_independent \
     --training_metadata ${DOWNLOAD_DIR}/metadata.csv \
     --lower_group cell_ontology_class \
     --upper_group tissue \
-    --out_path ./
+    --n_epochs 50 \
+    --out_path ./tmp 
 
 echo "DONE"

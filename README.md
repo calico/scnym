@@ -1,41 +1,81 @@
-# scNym -- Classify Single Cells
+# scNym - Semi-supervised adversarial neural networks for single cell classification
 
-<img src="assets/scnym_icon.png" width="368">
+<p align="center">
+    <img src="assets/scnym_icon.png" width="368">
+</p>
 
-`scNym` is a neural network model for predicting cell types from single cell profiling data (e.g. scRNA-seq) and deriving cell type representations from these models. While cell type classification is the main use case, these models can map single cell profiles to arbitrary output classes (e.g. experimental conditions).
+![](https://github.com/calico/scnym/workflows/test-scnym/badge.svg)
 
-We developed `scNym` as part of the [Murine Aging Cell Atlas](https://mca.research.calicolabs.com/). If you find `scNym` useful in your work, [please cite our preprint](https://www.biorxiv.org/content/10.1101/657726v1).
+`scNym` is a neural network model for predicting cell types from single cell profiling data (e.g. scRNA-seq) and deriving cell type representations from these models. 
+While cell type classification is the main use case, these models can map single cell profiles to arbitrary output classes (e.g. experimental conditions).
+
+We've described `scNym` in a recent preprint.
+Please cite our work if you find this tool helpful.
 
 ```
-A murine aging cell atlas reveals cell identity and tissue-specific trajectories of aging
-Jacob C. Kimmel, Lolita Penland, Nimrod D. Rubinstein, David G. Hendrickson, David R. Kelley, Adam Z. Rosenthal
-bioRxiv 657726; doi: https://doi.org/10.1101/657726
+PLACEHOLDER
 ```
 
-If you have any questions or suggestions, please feel free to email me:
+If you have an questions, please feel free to email me.
 
 Jacob C. Kimmel  
-[jacob@calicolabs.com](mailto:jacob@calicolabs.com)  
+[jacobkimmel+scnym@gmail.com](mailto:jacobkimmel+scnym@gmail.com)  
+Calico Life Sciences, LLC  
 
 ## Model
 
-The `scNym` model is a simple neural network leveraging modern best practices in architecture design. The model has a user configurable number of hidden layers, each with a user configurable number of parameters. Raw inputs are first processed with a dropout layer to simulate technical noise commonly observed in single cell profiling experiments. Subsequent hidden layers leverage the Residual Block design popularized in [Residual Networks](https://arxiv.org/abs/1512.03385) and are paired with ReLU activation, Batch Normalization, and Dropout layers.
+The `scNym` model is a neural network leveraging modern best practices in architecture design.
+Gene expression vectors are transformed by non-linear functions at each layer in the network.
+Each of these functions have parameters that are learned from data.
+
+`scNym` uses the MixMatch semi-supervision framework [(Berthelot et. al. 2019)](https://papers.nips.cc/paper/8749-mixmatch-a-holistic-approach-to-semi-supervised-learning) and domain adversarial training to take advantange of both labeled training data and unlabeled target data to learn these parameters.
+Given a labeled dataset `X` and an unlabeled dataset `U`, `scNym` uses the model to guess "pseudolabels" for each unlabeled observation.
+All observations are then augmented using the "MixUp" weighted averaging method prior to computing losses.
+
+We also introduce a domain adversarial network [(Ganin et. al. 2016)](https://arxiv.org/abs/1505.07818) that predicts the domain of origin (`{target, train}`) for each observation.
+We invert the adversaries gradients during backpropogation so the model learns to "compete" with the adversary by adapting across domains.
+Model parameters are then trained to minimize a supervised cross-entropy loss applied to the labeled examples, an unsupervised mean squared error loss applied to the unlabeled examples, and a classification loss across domains for the domain adversary.
+
+<p align="center">
+    <img src="assets/scnym_mmdan_diagram.png" width="638">
+</p>
+
+## Tutorials
+
+The best way to become acquainted with `scNym` is to walk through one of our interactive tutorials.
+We've prepared tutorials using [Google Colab](https://colab.research.google.com/) so that all computation can be performed using free GPUs. 
+You can even analyze data on your cell phone!
+
+### (1) Semi-supervised cell type classification using cell atlas references
+
+This tutorial demonstrates how to train a semi-supervised `scNym` model using a pre-prepared cell atlas as a training data set and a new data set as the target.
+You can upload your own data through Google Drive to classify cell types in a new experiment.
+
+[**Semi-supervised Training**](https://colab.research.google.com/drive/1-xEwHXq4INTSyqWo8RMT_pzCMZXNalex?usp=sharing)
+
+<a href="https://colab.research.google.com/drive/1-xEwHXq4INTSyqWo8RMT_pzCMZXNalex?usp=sharing"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
+
+### (2) Classifying cell types with pre-trained scNym models
+
+We also provide a tutorial that uses pre-trained scNym model weights to classify cell types in your data. 
+These predictions are less accurate than those provided by semi-supervised training with your data, but they are much faster to generate.
+
+We provide pre-trained weights for mouse, rat, and human cell atlases.
+
+[**Classification with Pre-trained Models**](https://colab.research.google.com/drive/1GxPG8u6SG42f2kkDgG45wWfGqyJLN2xo?usp=sharing)
+
+<a href="https://colab.research.google.com/drive/1GxPG8u6SG42f2kkDgG45wWfGqyJLN2xo?usp=sharing"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
 
 ## Installation
 
 First, clone the repository:
 
-```bash
-$ export SCNYM_PATH=~/ # change this to any path you prefer
-$ git clone git@github.com:calico/scnym.git $SCNYM_PATH
-```
-
-We recommend creating a virtual environment for use with `scNym`. This is easily accomplished using `virtualenv` or `conda`.
+We recommend creating a virtual environment for use with `scNym`. 
+This is easily accomplished using `virtualenv` or `conda`.
 
 ```bash
 $ virtualenv scnym_env
 $ source scnym_env/bin/activate
-$ pip install -r $SCNYM_PATH/requirements.txt
 ```
 
 or 
@@ -43,14 +83,12 @@ or
 ```bash
 $ conda create -n scnym_env
 $ conda activate scnym_env
-$ pip install -r $SCNYM_PATH/requirements.txt
 ```
 
 Once the environment is set up, simply run:
 
 ```bash
-$ cd $SCNYM_PATH
-$ python setup.py build install
+$ pip install scnym
 ```
 
 After installation completes, you should be able to run `scNym` as a command line tool:
@@ -61,9 +99,130 @@ $ scnym --help
 
 # Usage
 
+## Data Preprocessing
+
+Data inputs for scNym should be `log(CPM + 1)` normalized counts, where CPM is Counts Per Million and `log` is the natural logarithm.
+This transformation is crucial if you would like to use any of our pre-trained model weights, provided in the tutorials above.
+
+Input data can be stored as a dense `[Cells, Genes]` CSV of normalized counts, or in an [AnnData](https://anndata.readthedocs.io/en/stable/) `h5ad` object, or a [Loompy](http://loompy.org/) `loom` object.
+
+## Python API
+
+We recommend users take advantange of our python API for scNym, suitable for use in scripts and Jupyter notebooks.
+The API follows the [`scanpy` functional style](https://scanpy.readthedocs.io/en/stable/index.html) and has a single end-point.
+
+To begin with the python API, load your training and test data into `anndata.AnnData` objects using [`scanpy`](https://scanpy.readthedocs.io/en/stable/index.html).
+
+### Training
+
+Training an scNym model using the python API is simple.
+We provide an example below.
+
+```python
+from scnym.api import scnym_api
+
+scnym_api(
+    adata=adata,
+    task='train',
+    groupby='cell_ontology_class',
+    out_path='./scnym_output',
+    config='no_new_identity',
+)
+```
+
+The `groupby` keyword specifies a column in `adata.obs` containing annotations to use for model training.
+This API supports semi-supervised adversarial training using a special token in the annotation column.
+Any cell with the annotation `"Unlabeled"` will be treated as part of the target dataset and used for semi-supervised and adversarial training.
+
+We also provide two predefined configurations for model training.
+
+1. `no_new_identity` -- This configuration assumes every cell in the target set belongs to one of the classes in the training set. This assumption improves performance, but can lead to erroneously high confidence scores if new cell types are present in the target data.
+2. `new_identity_discovery` -- This configuration is useful for experiments where new cell type discoveries may occur. It uses pseudolabel thresholding to avoid the assumption above. If new cell types are present in the target data, they correctly receive low confidence scores. 
+
+### Prediction
+
+```python
+from scnym.api import scnym_api
+
+scnym_api(
+    adata=adata,
+    task='predict',
+    key_added='scNym',
+    trained_model='./scnym_output',
+    out_path='./scnym_output',
+    config='no_new_identity',
+)
+```
+
+The prediction task adds a key to `adata.obs` that contains the scNym annotation predictions, as well as the associated confidence scores.
+The key is defined by `key_added` and the confidence scores are stored as `adata.obs[key_added + '_confidence']`.
+
+The prediction task also extracts the activations of the penultimate scNym layer as an embedding and stores the result in `adata.obsm["X_scnym"]`.
+
+## Training and predicting with Cell Atlas References
+
+We also provide a set of preprocessed cell atlas references for [human](https://pubmed.ncbi.nlm.nih.gov/32214235/), [mouse](https://pubmed.ncbi.nlm.nih.gov/30283141), and [rat](https://pubmed.ncbi.nlm.nih.gov/32109414/), as well as pretrained weights for each.
+
+It's easy to use the scNym API to transfer labels from these atlases to your own data.
+
+### Semi-supervised training with cell atlas references
+
+The best way to transfer labels is by training an scNym model using your data as the target dataset for semi-supervised learning.
+Below, we demonstrate how to train a model on a cell atlas with your data as the target.
+
+```python
+import anndata
+from scnym.api import scnym_api, atlas2target
+
+# load your data
+adata = anndata.read_h5ad(path_to_your_data)
+
+# first, we create a single object with both the cell
+# atlas and your data
+# `atlas2target` will take care of passing annotations
+joint_adata = atlas2target(
+    adata=adata,
+    species='mouse',
+    key_added='annotations',
+)
+
+# now train an scNym model as above
+scnym_api(
+    adata=joint_adata,
+    task='train',
+    groupby='annotations',
+    out_path='./scnym_output',
+    config='new_identity_discovery',
+)
+```
+
+### Prediction with pre-trained weights
+
+Fully supervised scNym models don't work quite as well, but prediction is very fast.
+To predict with pretrained weights, simply run the `scnym_api` prediction, but specify `"pretrained_{species}"` as the `trained_model`.
+
+```python
+import anndata
+from scnym.api import scnym_api
+
+# load your data
+adata = anndata.read_h5ad(path_to_your_data)
+
+# predict using pre-trained weights
+scnym_api(
+    adata=adata,
+    task='predict',
+    key_added='scNym',
+    trained_model='pretrained_mouse',
+    out_path='./scnym_output',
+)
+```
+
 ## CLI
 
-Models can be trained using the included command line interface, `scnym`.  
+Models can be also trained using the included command line interface, `scnym`.
+The CLI allows for more detailed model configuration, but should only be used for experimentation.
+
 The CLI accepts configuration files in YAML or JSON formats, with parameters carrying the same names as command line arguments.
 
 To see a list of command line arguments/configuration parameters, run:
@@ -74,33 +233,9 @@ $ scnym -h
 
 A sample configuration is included as `default_config.txt`.
 
-## Data Preprocessing
-
-It is recommended that raw scRNA-seq counts be normalized prior to model training. A common approach normalized by the library size to Counts Per Million (CPM), then natural log + 1 transformed (i.e. `x_norm = ln(x_cpm + 1)`).
-
-Input data can be stored as a dense `[Cells, Genes]` CSV of normalized counts, or in an [AnnData](https://anndata.readthedocs.io/en/stable/) `h5ad` object, or a [Loompy](http://loompy.org/) `loom` object.
-
-All of the below are valid:
-
-```bash
-scnym -c configs/default_config.txt --input_counts counts.csv ...
-scnym -c configs/default_config.txt --input_counts counts.h5ad ...
-scnym -c configs/default_config.txt --input_counts counts.loom ...
-```
-
-`scNym` models may either be trained on all genes, or a subset of pre-selected genes. To subset genes from the provided inputs matrix, simply use the `--genes_to_use` argument pointed at a newline delimited text file of gene names. The supplied `--genes_to_use` must be a subset of `--input_genes`.
-
-## Training
-
-`scNym` employs a notion of an "upper" and "lower" grouping for data. The upper grouping acts as additional information for model construction, while the lower groups corerspond to the output classes. 
-
-Commonly, the upper grouping may correspond to the tissue cells were isolated from, while the lower grouping corresponds to the cell types of interest.
-
-`scNym` models are therefore available in three flavors: (1) tissue independent models, (2) tissue dependent models (conditional), and (3) tissue specific models.
-
 ### Demo Script
 
-A demo shell script is provided that downloads data from the [*Tabula Muris*](https://tabula-muris.ds.czbiohub.org/) and trains an `scnym` model.
+A CLI demo shell script is provided that downloads data from the [*Tabula Muris*](https://tabula-muris.ds.czbiohub.org/) and trains an `scnym` model.
 
 To execute the script, run:
 
@@ -110,152 +245,3 @@ source demo_script.sh
 ```
 
 in the repository directory.
-
-The script is an example of how to train a model and can serve as a template for your own data.
-
-### Tissue Independent Model
-
-Tissue independent models are trained on all cells provided without regard for the tissue of origin. 
-
-```bash
-$ scnym train_tissue_independent -c configs/default_config.txt
-```
-
-### Tissue Dependent Model
-
-Tissue dependent models are conditioned on the tissue of origin for each cell profile. 
-
-This is implemented by appending a one-hot encoded categorical vector representing the tissue of origin to the single cell profile vector of each cell. This categorical vector is omitted from the initial dropout layer of the model.
-
-```bash
-$ scnym train_tissue_dependent -c configs/default_config.txt
-```
-
-### Tissue Specific Training
-
-Tissue specific models are trained on only one upper group (e.g. one tissue) at a time.
-
-```bash
-$ scnym train_tissue_specific -c configs/default_config.txt
-```
-
-## Training Scheme
-
-Class balancing is performed using both over- and undersampling. Minority classes with fewer than `128` examples were oversampled, while classes with `>128` samples were undersampled.
-
-Models are trained with 5-fold cross-validation using both a validation set for model selection and a hold-out test set for evaluation.
-Final models were trained on all available class-balanced data.
-
-## Output Description
-
-Training a model with `scnym` with create the following directory structure:
-
-```bash
-tissue_independent/
-    all_data/ # models trained on all data except for a validation set used for model selection
-        # this directory contains the same structure as `fold00` below
-    fold00/
-        00_best_model_weights.pkl # the best model weights from this output fold
-        labels.csv # labels for each sample
-        predictions.csv # prediction for each sample when it was held-out
-        test_idx.csv # samples for model selection
-        train_idx.csv # samples for training
-        val_idx.csv # held-out samples
-        model_weights_NNN.pkl # model weights are saved at a specified frequency
-        {EXP_NAME}_log.csv # a running log of losses and accuracies during training
-        {EXP_NAME}_parameters.json # parameters provided to the model, JSON-ized
-    ...
-    fold04/
-        ...
-    celltype_label.csv # string labels for each output node
-    fold_eval_acc.csv # accuracy for each fold of training
-    fold_eval_losses.csv # loss for each fold of training
-tissue_depenendent/
-    # contains the same structure as `tissue_independent/`, but for 
-    # the tissue conditional models
-tissue_ind_class_optimums/
-    # this directory is populated when using the `find_cell_type_markers` command
-    {CLASS_INDEX}_{CLASS_NAME}_losses.csv # losses for input optimization of this class
-    {CLASS_INDEX}_{CLASS_NAME}_optima.csv # optima for input optimization of this class
-    ...
-tissues/
-    {UPPER_GROUP_NAME_0}/
-        # outputs for a classifier trained only on "lower groups"
-        # in "UPPER_GROUP_NAME_0" are stored here.
-        # contains the same structure as `tissue_independent/`
-        ...
-    ...
-    {UPPER_GROUP_NAME_N}/
-```
-
-## Trained Models
-
-scNym models have been trained on (1) all cell types in the *Tabula Muris* data set without tissue information, (2) all cell types conditioned on the tissue of origin, and (3) separate models have been trained to predict cell types within each tissue.
-
-We have provided pre-trained weights for models trained on the 10X data using the configuration in `default_config.txt`.
-Models were trained on all genes detected in an inner join of cells from the *Tabula Muris*. 
-
-To perform predictions with these models on new data, you'll need the list of gene names we used for training, as well as the training metadata (to get cell type output labels). We provide both below.
-
-[**Training Data Gene Names**](https://storage.googleapis.com/calico-website-mca-storage/20190604_scnym_training_gene_names.txt)
-
-[**Training Metadata**](https://storage.googleapis.com/calico-website-mca-storage/20190604_training_metadata.csv)
-
-### Pre-trained Model Weights
-
-[**10X Tissue Independent Model**](https://storage.googleapis.com/calico-website-mca-storage/20190604_tissue_independent_h0256_l1.pkl)
-
-[**10X Tissue Dependent Model**](https://storage.googleapis.com/calico-website-mca-storage/20190604_tissue_dependent_h0256_l1.pkl)  
-
-[**10X Tissue Specific Models**](https://storage.googleapis.com/calico-website-mca-storage/20190604_tissue_specific_weights_h0256_l1.tar.gz)
-
-### Pre-trained Model Performance
-
-Reported accuracies are the mean accuracy across 5 cross-validation splits (seperate sets were used for model selection and evaluation).
-
-Model | Accuracy
---------------|-----------
-Tissue Independent | 0.957
-Tissue Dependent | 0.958
-Bladder | 0.992
-Heart_and_Aorta	| 0.993
-Kidney | 0.983
-Limb_Muscle | 0.995
-Liver | 0.996
-Lung | 0.966
-Mammary_Gland | 0.985
-Marrow | 0.952
-Spleen | 0.956
-Thymus | 0.937
-Tongue | 0.964
-Trachea | 0.961
-
-See the [tutorial notebook](notebooks/scnym_classif_tutorial.ipynb) for a demonstration of performance on a lung data set generated using microwell-seq technology, instead of 10X.
-
-## Prediction
-
-Once a model has been trained (or if you use one of the pre-trained models above), cell type predictions can be made using the CLI or an interactive interface, suitable for use in Jupyter notebooks.
-
-### Notebook Tutorial
-
-In this tutorial linked below, we use a model trained on the *Tabula Muris* to predict cell types in the ["Mouse Cell Atlas"](http://bis.zju.edu.cn/MCA/).
-
-[Notebook cell type prediction tutorial](notebooks/scnym_classif_tutorial.ipynb)
-
-### CLI Prediction
-
-CLI prediction uses the same configuration file interface as model training.
-
-The two key parameters that differ are `--training_gene_names` and `--model_path`.   
-
-`--training_gene_names` is an ordered list of the gene names used in the original model training. Combined with the gene names you provide with the data set to be analyzed, `scnym` will sort or subset the genes to allow for prediction using the pre-trained weights. 
-We've found that prediction still works well, even if only a subset of the genes used during training are present in the prediction data set.
-
-`--model_path` is simply a path to the pickled model weights (as provided above).
-
-```bash
-scnym predict_cell_types \
-    -c /path/to/config_file.txt \
-    --training_gene_names /path/to/gene_names_used_for_training.txt \
-    --model_path /path/to/model_weights.pkl
-```

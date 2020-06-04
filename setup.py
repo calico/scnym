@@ -12,9 +12,9 @@ except ImportError:  # Deps not yet installed
 
 setup(
     name='scnym',
-    version='0.1',
-    description='Neural network classifiers for single cell profiling',
-    long_description=Path('README.md').read_text('utf-8'),
+    version='0.1.10',
+    description="Semi supervised adversarial network networks for single cell classification",
+    long_description="scNym uses the semi-supervised MixMatch framework and domain adversarial training to take advantage of information in both the labeled and unlabeled datasets.",
     url='http://github.com/calico/scnym',
     author=__author__,
     author_email=__email__,
@@ -26,7 +26,7 @@ setup(
     ],
     packages=find_packages(),
     entry_points=dict(
-        console_scripts=['scnym=scnym.main:main'],
+        console_scripts=['scnym=scnym.main:main', 'scnym_ad=scnym.scnym_ad:main'],
     ),
     classifiers=[
         'Environment :: Console',
