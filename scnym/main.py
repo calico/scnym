@@ -1,9 +1,10 @@
 '''Train scNym models and identify cell type markers'''
 import numpy as np
 import pandas as pd
+from scipy import sparse
 import os
 import os.path as osp
-import scanpy.api as sc
+import scanpy as sc
 
 import torch
 import torch.nn as nn
@@ -12,28 +13,552 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import StratifiedKFold
 from typing import Union
 import copy
+import itertools
+from functools import partial
 
 from .model import CellTypeCLF, CellTypeCLFConditional
-from .dataprep import SingleCellDS, balance_classes
-from .trainer import Trainer
+
+from .dataprep import SingleCellDS, SampleMixUp, balance_classes
+from .dataprep import AUGMENTATION_SCHEMES
+from .trainer import Trainer, SemiSupervisedTrainer
+from .trainer import cross_entropy, get_class_weight
+from .trainer import InterpolationConsistencyLoss, ICLWeight, MixMatchLoss, DANLoss
+
 from .predict import Predicter
 from . import utils
+
+# define optimizer map for cli selection
+OPTIMIZERS = {
+    'adadelta': torch.optim.Adadelta,
+    'adam': torch.optim.Adam,
+    'adamw': torch.optim.AdamW,
+    'sgd': torch.optim.SGD,
+}
 
 #########################################################
 # Train scNym classification models
 #########################################################
 
 
-def train_cv(X: np.ndarray,
-             y: np.ndarray,
-             batch_size: int,
-             n_epochs: int,
-             weight_decay: float,
-             ModelClass: nn.Module,
-             fold_indices: list,
-             out_path: str,
-             n_genes: int = None,
-             **kwargs) -> (np.ndarray, np.ndarray):
+def repeater(data_loader):
+    """Use `itertools.repeat` to infinitely loop through
+    a dataloader.
+    
+    Parameters
+    ----------
+    data_loader : torch.utils.data.DataLoader
+        data loader class.
+    
+    Yields
+    ------
+    data : Iterable
+        batches from `data_loader`.
+        
+    Credit
+    ------
+    https://bit.ly/2z0LGm8
+    """
+    for loader in itertools.repeat(data_loader):
+        for data in loader:
+            yield data
+
+
+def fit_model(
+    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    y: np.ndarray,
+    traintest_idx: np.ndarray,
+    val_idx: np.ndarray,
+    batch_size: int,
+    n_epochs: int,
+    lr: float,
+    optimizer_name: str,
+    weight_decay: float,
+    ModelClass: nn.Module,
+    out_path: str,
+    n_genes: int = None,
+    mixup_alpha: float = None,
+    unlabeled_counts: np.ndarray = None,
+    unsup_max_weight: float = 2.,
+    unsup_mean_teacher: bool = False,
+    ssl_method: str='mixmatch',
+    ssl_kwargs: dict={},
+    weighted_classes: bool = False,
+    balanced_classes: bool = False,
+    **kwargs,
+) -> (float, float):
+    '''Fit an scNym model given a set of observations and labels.
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        [Cells, Genes] of log1p transformed normalized values.
+        log1p and normalization performed using scanpy defaults.
+    y : np.ndarray
+        [Cells,] integer class labels.
+    traintest_idx : np.ndarray
+        [Int,] indices to use for training and early stopping.
+    val_idx : np.ndarray
+        [Int,] indices to hold-out for final model evaluation.
+    n_epochs : int
+        number of epochs for training.
+    lr : float
+        learning rate.
+    optimizer_name : str
+        optimizer to use. {"adadelta", "adam"}.
+    weight_decay : float
+        weight decay to apply to model weights.
+    ModelClass : nn.Module
+        a model class for construction classification models.
+    batch_size : int
+        batch size for training.        
+    fold_indices : list
+        elements are 2-tuple, with training indices and held-out.
+    out_path : str
+        top level path for saving fold outputs.
+    n_genes : int
+        number of genes in the input. Not necessarily `X.shape[1]` if
+        the input matrix has been concatenated with other features.
+    mixup_alpha : float
+        alpha parameter for an optional MixUp augmentation during training.
+    unsup_max_weight : float
+        maximum weight for the unsupervised loss term.
+    unsup_mean_teacher : bool
+        use a mean teacher for pseudolabel generation.
+    ssl_method : str
+        semi-supervised learning method to use.
+    ssl_kwargs : dict
+        arguments passed to the semi-supervised learning loss.
+    balanced_classes : bool
+        perform class balancing by undersampling majority classes.
+    weighted_classes : bool
+        weight loss for each class based on relative abundance of classes
+        in the training data.
+        
+    Returns
+    -------
+    test_acc : float
+        classification accuracy on the test set.
+    test_loss : float
+        supervised loss on the test set.
+    '''
+    # count the number of cell types available
+    n_cell_types = len(np.unique(y))
+    if n_genes is None:
+        n_genes = X.shape[1]
+        
+    # Set aside 10% of the traintest data for model selection in `test_idx`
+    train_idx = np.random.choice(traintest_idx,
+                                 size=int(
+                                     np.floor(0.9 * len(traintest_idx))),
+                                 replace=False).astype('int')
+    test_idx = np.setdiff1d(traintest_idx, train_idx).astype('int')
+    # save indices to CSVs for later retrieval
+    np.savetxt(osp.join(out_path, 'train_idx.csv'), train_idx)
+    np.savetxt(osp.join(out_path, 'test_idx.csv'), test_idx)
+    np.savetxt(osp.join(out_path, 'val_idx.csv'), val_idx)
+
+    # subset to traintest matrices
+    X_traintest = X[traintest_idx, :]
+    y_traintest = y[traintest_idx]
+
+    # balance or weight classes if applicable
+    if balanced_classes and weighted_classes:
+        msg = 'balancing AND weighting classes is not useful.'
+        msg += '\nPick one mode of accounting for class imbalances.'
+        raise ValueError(msg)
+    elif balanced_classes and not weighted_classes:
+        print('Setting up a stratified sampler...')
+        # we sample classes with weighted likelihood, rather than
+        # a uniform likelihood of sampling
+        # we use the inverse of the class count as a weight
+        # this is normalized in `WeightedRandomSample`
+        classes, counts = np.unique(y[train_idx], return_counts=True)
+        sample_weights = 1./counts
+        
+        # `WeightedRandomSampler` is kind of funny and takes a weight
+        # **per example** in the training set, rather than per class.
+        # here we assign the appropriate class weight to each sample
+        # in the training set.
+        weight_per_example = sample_weights[y[train_idx]]
+        
+        # we instantiate the sampler with the relevant weight for
+        # each observation and set the number of total samples to the
+        # number of samples in our training set
+        # `WeightedRandomSampler` will sample indices from a multinomial
+        # with probabilities computed from the normalized vector
+        # of `weights_per_example`.
+        sampler = torch.utils.data.sampler.WeightedRandomSampler(
+            weight_per_example, 
+            len(y[train_idx]),
+        )
+        class_weight = None
+    elif weighted_classes and not balanced_classes:
+        # compute class weights
+        # class weights amplify the loss of some classes and reduce
+        # the loss of others, inversely proportional to the class
+        # frequency
+        print('Weighting classes for training...')
+        class_weight = get_class_weight(y[train_idx])
+        print(class_weight)
+        print()
+        sampler = None
+    else:
+        print('Not weighting classes and not balancing classes.')
+        class_weight = None
+        sampler = None
+
+    # Generate training and model selection Datasets and Dataloaders
+    X_train = X[train_idx, :]
+    y_train = y[train_idx]
+
+    X_test = X[test_idx, :]
+    y_test = y[test_idx]
+
+    train_ds = SingleCellDS(
+        X=X_train,
+        y=y_train,
+        num_classes=len(np.unique(y)),
+    )
+    test_ds = SingleCellDS(
+        X_test,
+        y_test,
+        num_classes=len(np.unique(y)),
+    )
+
+    train_dl = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True if sampler is None else False,
+        sampler=sampler,
+    )
+    test_dl = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    dataloaders = {
+        'train': train_dl,
+        'val': test_dl,
+    }
+
+    # Define batch transformers
+    batch_transformers = {}
+    if mixup_alpha is not None and ssl_method != 'mixmatch':
+        print('Using MixUp as a batch transformer.')
+        batch_transformers['train'] = SampleMixUp(alpha=mixup_alpha)
+
+    # Build a cell type classification model and transfer to CUDA
+    model = ModelClass(
+        n_genes=n_genes,
+        n_cell_types=n_cell_types,
+        **kwargs,
+    )
+    if torch.cuda.is_available():
+        model = model.cuda()
+
+    # Set up loss criterion and the model optimizer
+    # here we use our own cross_entropy loss to handle
+    # discrete probability distributions rather than
+    # categorical predictions
+    if class_weight is None:
+        criterion = cross_entropy
+    else:
+        criterion = partial(
+            cross_entropy,
+            class_weight=torch.from_numpy(class_weight).float(),
+        )
+        
+    opt_callable = OPTIMIZERS[optimizer_name.lower()]
+    
+    if opt_callable != torch.optim.SGD:
+        optimizer = opt_callable(
+            model.parameters(),
+            weight_decay=weight_decay,
+            lr=lr,
+        )
+        scheduler = None
+    else:
+        # use SGD as the optimizer with momentum
+        # and a learning rate scheduler
+        optimizer = opt_callable(
+            model.parameters(),
+            weight_decay=weight_decay,
+            lr=lr,
+            momentum=0.9,
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optimizer,
+            T_max=n_epochs,
+            eta_min=lr/10000,
+        )
+        
+
+    # Build the relevant trainer object for either supervised
+    # or semi-supervised learning with interpolation consistency
+    trainer_kwargs = {
+        'model': model,
+        'criterion': criterion,
+        'optimizer': optimizer,
+        'scheduler': scheduler,
+        'dataloaders': dataloaders,
+        'out_path': out_path,
+        'batch_transformers': batch_transformers,
+        'n_epochs': n_epochs,
+        'min_epochs': n_epochs//20,
+        'save_freq': max(n_epochs//5, 1),
+        'reg_criterion': None,
+        'exp_name': osp.basename(out_path),
+        'verbose': False,
+        'tb_writer' : osp.join(out_path, 'tblog'),
+    }
+
+    if unlabeled_counts is None:
+        # perform fully supervised training
+        T = Trainer(**trainer_kwargs)
+    else:
+        # perform semi-supervised training
+
+        # Build a semi-supervised data loader that oversamples
+        # unsupervised data for interpolation consistency.
+        # This allows us to loop through the labeled data iterator
+        # without running out of unlabeled batches.
+        unsup_dataset = SingleCellDS(
+            X=unlabeled_counts,
+            y=np.zeros(unlabeled_counts.shape[0]),
+            num_classes=len(np.unique(y)),                
+        )
+        unsup_dataloader = DataLoader(
+            unsup_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=True,
+        )
+        unsup_dataloader = repeater(unsup_dataloader)
+
+        # Set up the unsupervised loss
+        if ssl_method.lower() == 'ict':
+            print('Using ICT for semi-supervised learning')                
+            USL = InterpolationConsistencyLoss(
+                alpha=mixup_alpha if mixup_alpha is not None else 0.3,
+                unsup_criterion=nn.MSELoss(),
+                sup_criterion=criterion,
+                decay_coef=ssl_kwargs.get('decay_coef', 0.997),
+                mean_teacher=unsup_mean_teacher,
+            )
+
+        elif ssl_method.lower() == 'mixmatch':
+            print('Using MixMatch for semi-supervised learning')
+            # we want the raw MSE per sample here, rather than the average
+            # so we set `reduction='none'`.
+            # this allows us to scale the weight of individual examples
+            # based on pseudolabel confidence.
+            unsup_criterion_name = ssl_kwargs.get('unsup_criterion', 'mse')
+            if unsup_criterion_name.lower() == 'mse':
+                unsup_criterion = nn.MSELoss(reduction='none')
+            elif unsup_criterion_name.lower() in ('crossentropy', 'ce'):
+                unsup_criterion = partial(
+                    cross_entropy,
+                    reduction='none',
+                )
+            USL = MixMatchLoss(
+                alpha=mixup_alpha if mixup_alpha is not None else 0.3,
+                unsup_criterion=unsup_criterion,
+                sup_criterion=criterion,
+                decay_coef=ssl_kwargs.get('decay_coef', 0.997),
+                mean_teacher=unsup_mean_teacher,
+                augment=AUGMENTATION_SCHEMES[ssl_kwargs.get('augment', 'log1p_drop')],
+                n_augmentations=ssl_kwargs.get('n_augmentations', 1),
+                T=ssl_kwargs.get('T', 0.5),
+                augment_pseudolabels=ssl_kwargs.get('augment_pseudolabels', True),
+                pseudolabel_min_confidence=ssl_kwargs.get('pseudolabel_min_confidence', 0.0),
+            )
+        else:
+            msg = f'{ssl_method} is not a valid semi-supervised learning method.\n'
+            msg += 'must be one of {"ict", "mixmatch"}'
+            raise ValueError(msg)
+
+        # set up the weight schedule
+        # we define a number of epochs for ramping, a number to wait
+        # ("burn_in_epochs") before we start the ramp up, and a maximum
+        # coefficient value
+        weight_schedule = ICLWeight(
+            ramp_epochs=ssl_kwargs.get('ramp_epochs', max(n_epochs//4, 1)),
+            max_unsup_weight=unsup_max_weight,
+            burn_in_epochs = ssl_kwargs.get('burn_in_epochs', 20),
+            sigmoid = ssl_kwargs.get('sigmoid', False),
+        )
+        # don't let early stopping save checkpoints from before the SSL 
+        # ramp up has started
+        trainer_kwargs['min_epochs'] = max(
+            trainer_kwargs['min_epochs'],
+            weight_schedule.burn_in_epochs + weight_schedule.ramp_epochs // 5,
+        )
+        
+        # if min_epochs are manually specified, use that number instead
+        if ssl_kwargs.get('min_epochs', None) is not None:
+            trainer_kwargs['min_epochs'] = ssl_kwargs['min_epochs']
+        
+        # let the model save weights even if the ramp is 
+        # longer than the total epochs we'll train for
+        trainer_kwargs['min_epochs'] = min(
+            trainer_kwargs['min_epochs'],
+            trainer_kwargs['n_epochs']-1,
+        )
+        
+        dan_criterion = ssl_kwargs.get('dan_criterion', None)
+        if dan_criterion is not None:
+            # initialize the DAN Loss
+            dan_criterion = DANLoss(
+                model=model,
+                dan_criterion=cross_entropy,
+                use_conf_pseudolabels=ssl_kwargs.get('dan_use_conf_pseudolabels', False),
+                scale_loss_pseudoconf=ssl_kwargs.get('dan_scale_loss_pseudoconf', False),
+            )
+
+            # setup the DANN learning rate schedule
+            dan_weight = ICLWeight(
+                ramp_epochs=ssl_kwargs.get('dan_ramp_epochs', max(n_epochs//4, 1)),
+                max_unsup_weight=ssl_kwargs.get('dan_max_weight', 1.),
+                burn_in_epochs = ssl_kwargs.get('dan_burn_in_epochs', 0),
+                sigmoid = ssl_kwargs.get('sigmoid', True),
+            )
+            # add DANN parameters to the optimizer
+            optimizer.add_param_group({
+                'params': dan_criterion.dann.domain_clf.parameters(),
+                'name': 'domain_classifier',
+            })
+        else:
+            dan_weight = None
+
+        # initialize the trainer
+        T = SemiSupervisedTrainer(
+            unsup_dataloader=unsup_dataloader,
+            unsup_criterion=USL,
+            unsup_weight=weight_schedule,
+            dan_criterion=dan_criterion,
+            dan_weight=dan_weight,
+            **trainer_kwargs,
+        )
+
+    print('Training...')
+    T.train()
+    print('Training complete.')
+    print()
+
+    # Perform model evaluation using the best set of weights on the
+    # totally unseen, held out data.
+    print('Evaluating model.')
+    model = ModelClass(
+        n_genes=n_genes,
+        n_cell_types=n_cell_types,
+        **kwargs,
+    )
+    model.load_state_dict(
+        torch.load(
+            osp.join(out_path, '00_best_model_weights.pkl'),
+        )
+    )
+    model.eval()
+
+    if torch.cuda.is_available():
+        model = model.cuda()
+
+    # Build a DataLoader for validation
+    X_val = X[val_idx, :]
+    y_val = y[val_idx]
+    val_ds = SingleCellDS(
+        X_val, 
+        y_val,
+        num_classes=len(np.unique(y)),            
+    )
+    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False,)
+
+    # Without recording any gradients to speed things up,
+    # predict classes for all held out data and evaluate metrics.
+    with torch.no_grad():
+        loss = 0.
+        running_corrects = 0.
+        running_total = 0.
+        all_predictions = []
+        all_labels = []
+        for data in val_dl:
+            input_ = data['input']
+
+            label_ = data['output']  # one-hot
+
+            if torch.cuda.is_available():
+                input_ = input_.cuda()
+                label_ = label_.cuda()
+
+            # make an integer version of labels for convenience
+            int_label_ = torch.argmax(label_, 1)
+
+            # Perform forward pass and compute predictions as the
+            # most likely class
+            output = model(input_)
+            _, predictions = torch.max(output, 1)
+
+            corrects = torch.sum(
+                predictions.detach()== int_label_.detach(),
+            )
+
+            l = criterion(output, label_)
+            loss += float(l.detach().cpu().numpy())
+
+            running_corrects += float(corrects.item())
+            running_total += float(label_.size(0))
+
+            all_labels.append(
+                int_label_.detach().cpu().numpy()
+            )
+
+            all_predictions.append(
+                predictions.detach().cpu().numpy()
+            )
+
+        norm_loss = loss / len(val_dl)
+        acc = running_corrects/running_total
+        print('EVAL LOSS: ', norm_loss)
+        print('EVAL ACC : ', acc)
+
+    all_predictions = np.concatenate(all_predictions)
+    all_labels = np.concatenate(all_labels)
+    np.savetxt(
+        osp.join(out_path, 'predictions.csv'),
+        all_predictions)
+    np.savetxt(
+        osp.join(out_path, 'labels.csv'),
+        all_labels)
+
+    PL = np.stack([all_predictions, all_labels], 0)
+    print('Predictions | Labels')
+    print(PL.T[:15, :])
+    return acc, norm_loss
+
+
+def train_cv(
+    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    y: np.ndarray,
+    batch_size: int,
+    n_epochs: int,
+    lr: float,
+    optimizer_name: str,    
+    weight_decay: float,
+    ModelClass: nn.Module,
+    fold_indices: list,
+    out_path: str,
+    n_genes: int = None,
+    mixup_alpha: float = None,
+    unlabeled_counts: np.ndarray = None,
+    unsup_max_weight: float = 2.,
+    unsup_mean_teacher: bool = False,
+    ssl_method: str='mixmatch',
+    ssl_kwargs: dict={},
+    weighted_classes: bool = False,
+    balanced_classes: bool = False,
+    **kwargs,
+) -> (np.ndarray, np.ndarray):
     '''Perform training using a provided set of training/hold-out
     sample indices.
 
@@ -46,6 +571,12 @@ def train_cv(X: np.ndarray,
         [Cells,] integer class labels.
     n_epochs : int
         number of epochs for training.
+    weight_decay : float
+        weight decay to apply to model weights.
+    lr : float
+        learning rate.
+    optimizer_name : str
+        optimizer to use. {"adadelta", "adam"}.        
     ModelClass : nn.Module
         a model class for construction classification models.
     batch_size : int
@@ -57,6 +588,21 @@ def train_cv(X: np.ndarray,
     n_genes : int
         number of genes in the input. Not necessarily `X.shape[1]` if
         the input matrix has been concatenated with other features.
+    mixup_alpha : float
+        alpha parameter for an optional MixUp augmentation during training.
+    unsup_max_weight : float
+        maximum weight for the unsupervised loss term.
+    unsup_mean_teacher : bool
+        use a mean teacher for pseudolabel generation.
+    ssl_method : str
+        semi-supervised learning method to use.
+    ssl_kwargs : dict
+        arguments passed to the semi-supervised learning loss.
+    balanced_classes : bool
+        perform class balancing by undersampling majority classes.
+    weighted_classes : bool
+        weight loss for each class based on relative abundance of classes
+        in the training data.
 
     Returns
     -------
@@ -65,10 +611,6 @@ def train_cv(X: np.ndarray,
     fold_eval_losses : np.ndarray
         loss values for each fold.
     '''
-    n_cell_types = len(np.unique(y))
-    if n_genes is None:
-        n_genes = X.shape[1]
-
     fold_eval_losses = np.zeros(len(fold_indices))
     fold_eval_acc = np.zeros(len(fold_indices))
 
@@ -82,144 +624,56 @@ def train_cv(X: np.ndarray,
         traintest_idx = fold_indices[f][0].astype('int')
         val_idx = fold_indices[f][1].astype('int')
 
-        # Set aside 10% of the traintest data for model selection in `test_idx`
-        train_idx = np.random.choice(traintest_idx,
-                                     size=int(
-                                         np.floor(0.9 * len(traintest_idx))),
-                                     replace=False).astype('int')
-        test_idx = np.setdiff1d(traintest_idx, train_idx).astype('int')
-        # save indices to CSVs for later retrieval
-        np.savetxt(osp.join(fold_out_path, 'train_idx.csv'), train_idx)
-        np.savetxt(osp.join(fold_out_path, 'test_idx.csv'), test_idx)
-        np.savetxt(osp.join(fold_out_path, 'val_idx.csv'), val_idx)
-
-        # Generate training and model selection Datasets and Dataloaders
-        X_train = X[train_idx, :]
-        y_train = y[train_idx]
-
-        X_test = X[test_idx, :]
-        y_test = y[test_idx]
-
-        train_ds = SingleCellDS(X_train, y_train,)
-        test_ds = SingleCellDS(X_test, y_test,)
-
-        train_dl = DataLoader(train_ds,
-                              batch_size=batch_size,
-                              shuffle=True,)
-        test_dl = DataLoader(test_ds,
-                             batch_size=batch_size,
-                             shuffle=True,)
-
-        dataloaders = {'train': train_dl,
-                       'val': test_dl, }
-
-        # Build a cell type classification model and transfer to CUDA
-        model = ModelClass(n_genes=n_genes,
-                           n_cell_types=n_cell_types,
-                           **kwargs)
-        if torch.cuda.is_available():
-            model = model.cuda()
-
-        # Set up loss criterion and the model optimizer
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adadelta(model.parameters(),
-                                         weight_decay=weight_decay)
-
-        print('Training...')
-        T = Trainer(model=model,
-                    criterion=criterion,
-                    optimizer=optimizer,
-                    dataloaders=dataloaders,
-                    out_path=fold_out_path,
-                    n_epochs=n_epochs,
-                    reg_criterion=None,
-                    exp_name='fold' + str(f).zfill(2),
-                    verbose=False,)
-        T.train()
-        print('Training complete.')
-        print()
-
-        # Perform model evaluation using the best set of weights on the
-        # totally unseen, held out data.
-        print('Evaluating tissue independent, fold %d.' % f)
-        model = ModelClass(n_genes=n_genes,
-                           n_cell_types=n_cell_types,
-                           **kwargs,)
-        model.load_state_dict(
-            torch.load(osp.join(fold_out_path, '00_best_model_weights.pkl'))
+        acc, loss = fit_model(
+            X=X,
+            y=y,
+            traintest_idx=traintest_idx,
+            val_idx=val_idx,
+            out_path=fold_out_path,
+            batch_size=batch_size,
+            n_epochs=n_epochs,
+            ModelClass=ModelClass,
+            n_genes=n_genes,
+            lr=lr,
+            optimizer_name=optimizer_name,            
+            weight_decay=weight_decay,
+            mixup_alpha=mixup_alpha,
+            unlabeled_counts=unlabeled_counts,
+            unsup_max_weight=unsup_max_weight,
+            unsup_mean_teacher=unsup_mean_teacher,
+            ssl_method=ssl_method,
+            ssl_kwargs=ssl_kwargs,    
+            weighted_classes=weighted_classes,
+            balanced_classes=balanced_classes,
+            **kwargs,
         )
-        model.eval()
-
-        if torch.cuda.is_available():
-            model = model.cuda()
-
-        # Build a DataLoader for validation
-        X_val = X[val_idx, :]
-        y_val = y[val_idx]
-        val_ds = SingleCellDS(X_val, y_val,)
-        val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False,)
-
-        # Without recording any gradients to speed things up,
-        # predict classes for all held out data and evaluate metrics.
-        with torch.no_grad():
-            loss = 0.
-            running_corrects = 0.
-            running_total = 0.
-            all_predictions = []
-            all_labels = []
-            for data in val_dl:
-                input_ = data['input']
-                label_ = data['output']
-
-                if torch.cuda.is_available():
-                    input_ = input_.cuda()
-                    label_ = label_.cuda()
-
-                # Perform forward pass and compute predictions as the
-                # most likely class
-                output = model(input_)
-                _, predictions = torch.max(output, 1)
-                corrects = torch.sum(predictions.detach() == label_.detach())
-
-                l = criterion(output, label_)
-                loss += float(l.detach().cpu().numpy())
-
-                running_corrects += float(corrects.item())
-                running_total += float(label_.size(0))
-
-                all_labels.append(label_.detach().cpu().numpy())
-                all_predictions.append(predictions.detach().cpu().numpy())
-
-            norm_loss = loss / len(val_dl)
-            print('EVAL LOSS: ', norm_loss)
-            print('EVAL ACC : ', running_corrects/running_total)
-        fold_eval_acc[f] = running_corrects/running_total
-        fold_eval_losses[f] = norm_loss
-
-        all_predictions = np.concatenate(all_predictions)
-        all_labels = np.concatenate(all_labels)
-        np.savetxt(
-            osp.join(fold_out_path, 'predictions.csv'),
-            all_predictions)
-        np.savetxt(
-            osp.join(fold_out_path, 'labels.csv'),
-            all_labels)
-
-        PL = np.stack([all_predictions, all_labels], 0)
-        print('Predictions | Labels')
-        print(PL.T[:15, :])
+        
+        fold_eval_losses[f] = loss
+        fold_eval_acc[f] = acc
     return fold_eval_acc, fold_eval_losses
 
 
-def train_all(X: np.ndarray,
-              y: np.ndarray,
-              batch_size: int,
-              n_epochs: int,
-              weight_decay: float,
-              ModelClass: nn.Module,
-              out_path: str,
-              n_genes: int = None,
-              **kwargs) -> (float, float):
+def train_all(
+    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    y: np.ndarray,
+    batch_size: int,
+    n_epochs: int,
+    ModelClass: nn.Module,
+    out_path: str,
+    n_genes: int = None,
+    lr: float=1.0,
+    optimizer_name: str='adadelta',
+    weight_decay: float = None,
+    mixup_alpha: float = None,
+    unlabeled_counts: np.ndarray = None,
+    unsup_max_weight: float = 2.,
+    unsup_mean_teacher: bool = False,
+    ssl_method: str='mixmatch',
+    ssl_kwargs: dict={},    
+    weighted_classes: bool = False,
+    balanced_classes: bool = False,
+    **kwargs,
+) -> (float, float):
     '''Perform training using all provided samples.
 
     Parameters
@@ -240,153 +694,100 @@ def train_all(X: np.ndarray,
     n_genes : int
         number of genes in the input. Not necessarily `X.shape[1]` if
         the input matrix has been concatenated with other features.
+    lr : float
+        learning rate.
+    optimizer_name : str
+        optimizer to use. {"adadelta", "adam"}.        
+    weight_decay : float
+        weight decay to apply to model weights.
+    balanced_classes : bool
+        perform class balancing by undersampling majority classes.
+    weighted_classes : bool
+        weight loss for each class based on relative abundance of classes
+        in the training data.      
 
     Returns
     -------
-    test_loss : float
+    loss : float
         best loss on the testing set used for model selection.
-    test_acc : float
+    acc : float
         best accuracy on the testing set used for model selection.
     '''
-    n_cell_types = len(np.unique(y))
-    if n_genes is None:
-        n_genes = X.shape[1]
-
     # Prepare a unique output directory
     all_out_path = osp.join(out_path, 'all_data')
-    os.makedirs(all_out_path, exist_ok=True)
+    if not osp.exists(all_out_path):
+        os.mkdir(all_out_path)
 
     # Generate training and model selection indices
-    train_idx = np.random.choice(
+    traintest_idx = np.random.choice(
         np.arange(X.shape[0]),
         size=int(np.floor(0.9*X.shape[0])),
-        replace=False).astype('int')
-    test_idx = np.setdiff1d(np.arange(X.shape[0]), train_idx).astype('int')
+        replace=False,
+    ).astype('int')
+    val_idx = np.setdiff1d(
+        np.arange(X.shape[0]), traintest_idx,
+    ).astype('int')
 
-    # Generate training and model selection Datasets and Dataloaders
-    X_train = X[train_idx, :]
-    y_train = y[train_idx]
-
-    X_test = X[test_idx, :]
-    y_test = y[test_idx]
-
-    train_ds = SingleCellDS(X_train, y_train,)
-    test_ds = SingleCellDS(X_test, y_test,)
-
-    train_dl = DataLoader(train_ds,
-                          batch_size=batch_size,
-                          shuffle=True,)
-    test_dl = DataLoader(test_ds,
-                         batch_size=batch_size,
-                         shuffle=True,)
-
-    dataloaders = {'train': train_dl,
-                   'val': test_dl, }
-
-    # Build a cell type classification model and transfer to CUDA
-    model = ModelClass(n_genes=n_genes,
-                       n_cell_types=n_cell_types,
-                       **kwargs)
-    if torch.cuda.is_available():
-        model = model.cuda()
-
-    # Set up loss criterion and the model optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adadelta(model.parameters(),
-                                     weight_decay=weight_decay)
-
-    # Fit the model
-    print('Training...')
-    T = Trainer(model=model,
-                criterion=criterion,
-                optimizer=optimizer,
-                dataloaders=dataloaders,
-                out_path=all_out_path,
-                n_epochs=n_epochs,
-                reg_criterion=None,
-                exp_name='all_data',
-                verbose=False,)
-    T.train()
-    print('Training complete.')
-    print()
-
-    # Perform model evaluation on the validation set
-    # This is the best we can do when fitting to all the data.
-    model = ModelClass(n_genes=n_genes,
-                       n_cell_types=n_cell_types,
-                       **kwargs,)
-    model.load_state_dict(
-        torch.load(osp.join(all_out_path, '00_best_model_weights.pkl'))
+    acc, loss = fit_model(
+        X=X,
+        y=y,
+        traintest_idx=traintest_idx,
+        val_idx=val_idx,
+        batch_size=batch_size,
+        n_epochs=n_epochs,
+        ModelClass=ModelClass,
+        out_path=all_out_path,
+        n_genes=n_genes,
+        lr=lr,
+        optimizer_name=optimizer_name,        
+        weight_decay=weight_decay,
+        mixup_alpha=mixup_alpha,
+        unlabeled_counts=unlabeled_counts,
+        unsup_max_weight=unsup_max_weight,
+        unsup_mean_teacher=unsup_mean_teacher,
+        ssl_method=ssl_method,
+        ssl_kwargs=ssl_kwargs,    
+        weighted_classes=weighted_classes,
+        balanced_classes=balanced_classes,
+        **kwargs,
     )
-    model.eval()
-
-    if torch.cuda.is_available():
-        model = model.cuda()
-
-    with torch.no_grad():
-        loss = 0.
-        running_corrects = 0.
-        running_total = 0.
-        all_predictions = []
-        all_labels = []
-        for data in test_dl:
-            input_ = data['input']
-            label_ = data['output']
-
-            if torch.cuda.is_available():
-                input_ = input_.cuda()
-                label_ = label_.cuda()
-
-            # Perform forward pass and compute predictions as the
-            # most likely class
-            output = model(input_)
-            _, predictions = torch.max(output, 1)
-            corrects = torch.sum(predictions.detach() == label_.detach())
-
-            l = criterion(output, label_)
-            loss += float(l.detach().cpu().numpy())
-
-            running_corrects += float(corrects.item())
-            running_total += float(label_.size(0))
-
-            all_labels.append(label_.detach().cpu().numpy())
-            all_predictions.append(predictions.detach().cpu().numpy())
-
-        test_loss = loss / len(test_dl)
-        test_acc = running_corrects/running_total
-        print('FINAL EVAL LOSS: ', test_loss)
-        print('FINAL EVAL ACC : ', test_acc)
 
     np.savetxt(
         osp.join(all_out_path, 'test_loss_acc.csv'),
-        np.array([test_loss, test_acc]).reshape(2, 1),
+        np.array([loss, acc]).reshape(2, 1),
         delimiter=',')
 
-    return test_loss, test_acc
+    return loss, acc
 
 
-def train_tissue_independent_cv(X: np.ndarray,
-                                metadata: pd.DataFrame,
-                                out_path: str,
-                                balanced_classes: bool = False,
-                                batch_size: int = 256,
-                                n_epochs: int = 200,
-                                lower_group: str = 'cell_ontology_class',
-                                **kwargs,):
+def train_tissue_independent_cv(
+    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    metadata: pd.DataFrame,
+    out_path: str,
+    balanced_classes: bool = False,
+    weighted_classes: bool = False,
+    batch_size: int = 256,
+    n_epochs: int = 200,
+    lower_group: str = 'cell_ontology_class',
+    **kwargs,
+) -> None:
     '''
     Trains a cell type classifier that is independent of tissue origin
 
     Parameters
     ----------
     X : np.ndarray
-        [Cells, Genes] of log1p transformed normalized values.
+        [Cells, Genes] of log1p transformed, normalized values.
         log1p and normalization performed using scanpy defaults.
     metadata : pd.DataFrame
         [Cells, Features] data with `upper_group` and `lower_group` columns.
     out_path : str
         path for saving trained model weights and evaluation performance.
-    balanced_classes : bool, optional
+    balanced_classes : bool
         perform class balancing by undersampling majority classes.
+    weighted_classes : bool
+        weight loss for each class based on relative abundance of classes
+        in the training data.
     batch_size : int
         batch size for training.
     n_epochs : int
@@ -415,21 +816,18 @@ def train_tissue_independent_cv(X: np.ndarray,
     celltypes = sorted(list(set(metadata[lower_group])))
     print('There are %d %s in the experiment.\n' %
           (len(celltypes), lower_group))
+
     for t in celltypes:
         print(t)
+
+    # identify all the `lower_group` levels and create
+    # an integer class vector corresponding to unique levels
     y = pd.Categorical(metadata[lower_group]).codes
     y = y.astype('int32')
     labels = pd.Categorical(metadata[lower_group]).categories
     # save mapping of levels : integer values as a CSV
     out_df = pd.DataFrame({'label': labels, 'code': np.arange(len(labels))})
     out_df.to_csv(osp.join(out_path, 'celltype_label.csv'))
-
-    if balanced_classes:
-        print('Performing class balancing by undersampling...')
-        balanced_idx = balance_classes(y)
-        X = X[balanced_idx, :]
-        y = y[balanced_idx]
-        print('Class balancing complete.')
 
     # generate k-fold cross-validation split indices
     # & vectors for metrics evaluated at each fold.
@@ -445,9 +843,13 @@ def train_tissue_independent_cv(X: np.ndarray,
         ModelClass=CellTypeCLF,
         fold_indices=kf_indices,
         out_path=out_path,
-        **kwargs)
+        balanced_classes=balanced_classes,
+        weighted_classes=weighted_classes,
+        **kwargs,
+    )
 
     # Save the per-fold results to CSVs
+
     print('Fold eval losses')
     print(fold_eval_losses)
     print('Fold eval accuracy')
@@ -464,22 +866,29 @@ def train_tissue_independent_cv(X: np.ndarray,
         n_epochs=n_epochs,
         ModelClass=CellTypeCLF,
         out_path=out_path,
-        **kwargs)
+        balanced_classes=balanced_classes,
+        weighted_classes=weighted_classes,
+        **kwargs,
+    )
 
     return
 
 
-def train_tissue_dependent_cv(X: np.ndarray,
-                              metadata: pd.DataFrame,
-                              out_path: str,
-                              balanced_classes: bool = False,
-                              batch_size: int = 256,
-                              n_epochs: int = 200,
-                              upper_group: str = 'tissue',
-                              lower_group: str = 'cell_ontology_class',
-                              **kwargs,) -> None:
+def train_tissue_dependent_cv(
+    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    metadata: pd.DataFrame,
+    out_path: str,
+    balanced_classes: bool = False,
+    weighted_classes: bool = False,
+    batch_size: int = 256,
+    n_epochs: int = 200,
+    upper_group: str = 'tissue',
+    lower_group: str = 'cell_ontology_class',
+    **kwargs,
+) -> None:
     '''
     Trains a cell type classifier conditioned on tissue of origin.
+
 
     Parameters
     ----------
@@ -492,6 +901,9 @@ def train_tissue_dependent_cv(X: np.ndarray,
         path for saving trained model weights and evaluation performance.
     balanced_classes : bool, optional
         perform class balancing by undersampling majority classes.
+    weighted_classes : bool
+        weight loss for each class based on relative abundance of classes
+        in the training data.        
     batch_size : int
         batch size for training.
     upper_group : str
@@ -527,6 +939,7 @@ def train_tissue_dependent_cv(X: np.ndarray,
     print('There are %d tissues in the experiment.\n' % len(tissues))
     print()
     print('%s levels:' % lower_group)
+
     for t in celltypes:
         print(t)
 
@@ -560,13 +973,6 @@ def train_tissue_dependent_cv(X: np.ndarray,
     print('One hot matrix appended to [Cells, Genes] array.')
     print('New dimensions: ', X.shape)
 
-    if balanced_classes:
-        print('Performing class balancing by undersampling...')
-        balanced_idx = balance_classes(y)
-        X = X[balanced_idx, :]
-        y = y[balanced_idx]
-        print('Class balancing complete.')
-
     # generate k-fold cross-validation split indices
     # & vectors for metrics evaluated at each fold.
     kf = StratifiedKFold(n_splits=5, shuffle=True)
@@ -583,7 +989,10 @@ def train_tissue_dependent_cv(X: np.ndarray,
         ModelClass=CellTypeCLFConditional,
         fold_indices=kf_indices,
         out_path=out_path,
-        **kwargs)
+        balanced_classes=balanced_classes,
+        weighted_classes=weighted_classes,
+        **kwargs,
+    )
 
     print('Fold eval losses')
     print(fold_eval_losses)
@@ -603,19 +1012,25 @@ def train_tissue_dependent_cv(X: np.ndarray,
         n_tissues=n_tissues,
         ModelClass=CellTypeCLFConditional,
         out_path=out_path,
-        **kwargs)
+        balanced_classes=balanced_classes,
+        weighted_classes=weighted_classes,
+        **kwargs,
+    )
     return
 
 
-def train_one_tissue_cv(X: np.ndarray,
-                        metadata: pd.DataFrame,
-                        out_path: str,
-                        balanced_classes: bool = False,
-                        batch_size: int = 256,
-                        n_epochs: int = 200,
-                        upper_group: str = 'tissue',
-                        lower_group: str = 'cell_ontology_class',
-                        **kwargs,) -> None:
+def train_one_tissue_cv(
+    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    metadata: pd.DataFrame,
+    out_path: str,
+    balanced_classes: bool = False,
+    weighted_classes: bool = False,
+    batch_size: int = 256,
+    n_epochs: int = 200,
+    upper_group: str = 'tissue',
+    lower_group: str = 'cell_ontology_class',
+    **kwargs,
+) -> None:
     '''
     Trains a cell type classifier for a single tissue
 
@@ -630,6 +1045,9 @@ def train_one_tissue_cv(X: np.ndarray,
         path for saving trained model weights and evaluation performance.
     balanced_classes : bool, optional
         perform class balancing by undersampling majority classes.
+    weighted_classes : bool
+        weight loss for each class based on relative abundance of classes
+        in the training data.        
     upper_group : str
         column in `metadata` with subsets for training `lower_group`
         classifiers independently. i.e. tissues.
@@ -659,13 +1077,6 @@ def train_one_tissue_cv(X: np.ndarray,
     out_df = pd.DataFrame({'label': labels, 'code': np.arange(len(labels))})
     out_df.to_csv(osp.join(out_path, 'celltype_label.csv'))
 
-    if balanced_classes:
-        print('Performing class balancing by undersampling...')
-        balance_idx = balance_classes(y,)
-        X = X[balance_idx, :]
-        y = y[balance_idx]
-        print('Class balancing complete.')
-
     kf = StratifiedKFold(n_splits=5, shuffle=True)
     kf_indices = list(kf.split(X, y))
 
@@ -678,7 +1089,10 @@ def train_one_tissue_cv(X: np.ndarray,
         ModelClass=CellTypeCLF,
         fold_indices=kf_indices,
         out_path=out_path,
-        **kwargs)
+        weighted_classes=weighted_classes,
+        balanced_classes=balanced_classes,
+        **kwargs,
+    )
 
     print('Fold eval losses')
     print(fold_eval_losses)
@@ -696,17 +1110,23 @@ def train_one_tissue_cv(X: np.ndarray,
         n_epochs=n_epochs,
         ModelClass=CellTypeCLF,
         out_path=out_path,
-        **kwargs)
+        weighted_classes=weighted_classes,
+        balanced_classes=balanced_classes,        
+        **kwargs,
+    )
     return
 
 
-def train_tissue_specific_cv(X: np.ndarray,
-                             metadata: pd.DataFrame,
-                             out_path: str,
-                             balanced_classes: dict = None,
-                             upper_group: str = 'tissue',
-                             lower_group: str = 'cell_ontology_class',
-                             **kwargs,) -> None:
+def train_tissue_specific_cv(
+    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    metadata: pd.DataFrame,
+    out_path: str,
+    balanced_classes: dict = None,
+    weighted_classes: bool = None,
+    upper_group: str = 'tissue',
+    lower_group: str = 'cell_ontology_class',
+    **kwargs,
+) -> None:
     '''
     Train tissue dependent cell type classifiers for each
     tissue in the experiment
@@ -724,6 +1144,9 @@ def train_tissue_specific_cv(X: np.ndarray,
         keyed by tissue name.
         values are booleans specifying whether to perform class
         balancing for a given tissue.
+    weighted_classes : bool
+        weight loss for each class based on relative abundance of classes
+        in the training data.        
     upper_group : str
         column in `metadata` with subsets for training `lower_group`
         classifiers independently. i.e. tissues.
@@ -756,267 +1179,17 @@ def train_tissue_specific_cv(X: np.ndarray,
             # determine if we should balance classes for this tissue
             bc = balanced_classes.get(t, False)
 
-        train_one_tissue_cv(tissue_X,
-                            tissue_meta,
-                            tissue_out_path,
-                            balanced_classes=bc,
-                            upper_group=upper_group,
-                            lower_group=lower_group,
-                            **kwargs)
+        train_one_tissue_cv(
+            tissue_X,
+            tissue_meta,
+            tissue_out_path,
+            balanced_classes=bc,
+            weighted_classes=weighted_classes,
+            upper_group=upper_group,
+            lower_group=lower_group,
+            **kwargs,
+        )
 
-    return
-
-#########################################################
-# Identify cell type markers
-#########################################################
-
-
-def optimize_class(model: nn.Module,
-                   class_idx: int,
-                   n_genes: int,
-                   n_epochs: int = 10000,
-                   lr: float = 10.0,
-                   reg_strength: float = 1e-4,
-                   verbose: bool = True,
-                   log_iter: int = 1000,
-                   _init_vector: np.ndarray = None,
-                   ) -> (torch.FloatTensor, list, float):
-    '''
-    Optimize the input to a model to maximize the probability
-    of a target class.
-
-    Parameters
-    ----------
-    model : nn.Module
-        pretrained classification model.
-    class_idx : int
-        class index to optimize.
-    n_genes : int
-        number of genes as input to the model.
-    n_epochs : int
-        number of epochs for optimization.
-    lr : float
-        learning rate.
-    reg_strength : float
-        L1 norm regularization strength.
-    verbose : bool
-        print losses during training.
-    _init_vector : np.ndarray
-        [n_genes,] vector to use for model initialization.
-        if `None`, uses a unit Gaussian to initialize.
-
-    Returns
-    -------
-    optimum : torch.FloatTensor
-        [n_genes,] vector that optimizes the target class probability.
-    losses : list
-        loss for every `log_iter` iterations of input optimization.
-    min_loss : float
-        minimum identified loss value, corresponds to the loss at 
-        `optimum`.
-
-    See Also
-    --------
-    find_cell_type_markers
-    '''
-    print('Making input with %d genes' % n_genes)
-    print('Using l1_strength: ', reg_strength)
-    if _init_vector is None:
-        # Initialize an input vector with Gaussian noise
-        input_ = torch.rand(n_genes).float().unsqueeze(0)
-    else:
-        # Prepare the supplied input vector as a torch.FloatTensor
-        if type(_init_vector) == np.ndarray:
-            input_ = torch.from_numpy(_init_vector).float().unsqueeze(0)
-        elif type(_init_vector) == torch.FloatTensor:
-            if _init_vector.size(0) != 1:
-                # add an empty batch dimension if it's not present
-                input_ = _init_vector.unsqueeze(0)
-            else:
-                input_ = _init_vector
-        else:
-            raise ValueError('_init_vector type %s is invalid.' %
-                             str(type(_init_vector)))
-    if torch.cuda.is_available():
-        input_ = input_.cuda()
-
-    # Collect gradients on the input
-    input_.requires_grad = True
-    print(input_.size())
-    # Set up an optimizer to take gradient steps on the input
-    optimizer = torch.optim.Adadelta([input_], lr=lr)
-
-    # add a ReLU to the beginning of the model to generate
-    # only non-negative inputs
-    relu_model = nn.Sequential(nn.ReLU(),
-                               model)
-
-    # initialize best loss as a high value
-    min_loss = 1e6
-    optimum = copy.copy(input_)
-    losses = []
-
-    for epoch in range(n_epochs):
-        # compute new gradients and take a step down
-        # the gradient
-        optimizer.zero_grad()
-        output = relu_model(input_)
-        sm_output = F.softmax(output, dim=1)
-        l1 = torch.norm(input_[0, :], 1)
-        loss = -sm_output[0, class_idx] + reg_strength*l1
-        if loss < min_loss:
-            optimum = copy.copy(input_)
-            min_loss = loss.detach().cpu().item()
-        loss.backward()
-        optimizer.step()
-
-        if verbose and epoch % log_iter == 0:
-            print('Epoch %d Loss %f' % (epoch, loss.detach().cpu().item()))
-            print(input_)
-        if epoch % log_iter == 0:
-            losses.append(loss.detach().cpu().item())
-    if verbose:
-        print('Optimal activation')
-        print(optimum)
-        print('Best Loss')
-        print(min_loss)
-        print('Number non-zero genes')
-        print(torch.sum(optimum > 0.01))
-    return optimum, losses, min_loss
-
-
-def find_cell_type_markers(X,
-                           metadata,
-                           model_path: str,
-                           out_path: str,
-                           genes_to_use: list = None,
-                           upper_group: str = 'tissue',
-                           lower_group: str = 'cell_ontology_class',
-                           reg_strength: float = 1e4,
-                           **kwargs,) -> None:
-    '''
-    Find the maximally activating input for each cell type class.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        [Cells, Genes] of log1p transformed, normalized values.
-        log1p and normalization performed using scanpy defaults.
-    metadata : pd.DataFrame
-        [Cells, Features] data with 'tissue' and 'cell_ontology_class' columns.
-    model_path : str
-        path to pretrained model weights.
-    out_path : str
-        path for outputs.
-    genes_to_use : list
-        gene str names to use for training.
-        `len(genes_to_use) == X.shape[1]`
-    upper_group : str
-        column in `metadata` with subsets for training `lower_group`
-        classifiers independently. i.e. tissues.
-    lower_group : str
-        column in `metadata` with output classes. i.e. cell types.
-    reg_strength : float
-        L1 norm regularization strength.
-
-    Returns
-    -------
-    None.
-
-    Notes
-    -----
-    We identify markers for each output class using an input 
-    optimization approach. For each output class, we instantiate
-    an input cell profile vector using random noise, and optimize
-    the vector by gradient descent to maximize the probability
-    on the target output class. 
-
-    By including l_1 regularization, we can encourage optimal 
-    input vectors to be sparse. This sparsity enables us to
-    identify marker genes for the target class. Here, we perform
-    the optimization across 10 separate initializations to assess
-    the consistency of genes we discover.
-
-    See Also
-    --------
-    optimize_class
-    '''
-    # Identify relevant output classes
-    celltypes = sorted(list(set(metadata[lower_group])))
-    n_cell_types = len(celltypes)
-    n_genes = X.shape[1]
-
-    # Instantiate a pre-trained model
-    model = CellTypeCLF(n_genes=n_genes,
-                        n_cell_types=n_cell_types,
-                        **kwargs)
-    print('Loading pretrained model...')
-    model.load_state_dict(torch.load(model_path, map_location='cpu'))
-    if torch.cuda.is_available():
-        model = model.cuda()
-    print('Model loaded.')
-    model.eval()
-
-    # For each output class, perform input optimization
-    optima = []
-    losses = []
-    for class_idx in range(len(celltypes)):
-        cell_type_optima = []
-        cell_type_losses = []
-        print('Optimizing for %s' % str(celltypes[class_idx]))
-        for rep in range(10):
-            # Perform 10 independent iterations of class optimization
-            # to evaluate the consistency of identified optima
-            optimum, losses, best_loss = optimize_class(
-                model=model,
-                class_idx=class_idx,
-                n_genes=n_genes,
-                reg_strength=reg_strength)
-
-            cell_type_optima.append(
-                optimum.detach().cpu().numpy())
-            cell_type_losses.append(losses)
-
-        # Output the cell type optima as a matrix and save the
-        # associated loss values to CSV
-        cell_type_optima = np.concatenate(cell_type_optima, axis=0)
-        optima.append(cell_type_optima)
-
-        cell_type_losses = np.stack(losses, axis=0)
-        np.savetxt(
-            osp.join(out_path,
-                     (str(class_idx).zfill(3)
-                      + '_'
-                      + str(celltypes[class_idx])
-                      .replace(' ', '_')
-                      .upper()
-                      + '_losses.csv')
-                     ),
-            cell_type_losses,
-            delimiter=',')
-        np.savetxt(
-            osp.join(out_path,
-                     (str(class_idx).zfill(3)
-                      + '_'
-                      + str(celltypes[class_idx])
-                      .replace(' ', '_')
-                      .upper()
-                      + '_optima.csv')),
-            cell_type_optima,
-            delimiter=',')
-
-    # Save a single large optima matrix across all cell types
-    optima = np.stack(optima, axis=0)  # [CellTypes, Replicates, Genes]
-    optima = np.reshape(optima, (n_cell_types*10, n_genes)
-                        )  # [CellType*Replicates, Genes]
-    df = pd.DataFrame(optima)
-    if genes_to_use is not None:
-        df.columns = genes_to_use
-    df.insert(0, lower_group, np.repeat(celltypes, 10))
-    df.to_csv(
-        osp.join(out_path, '%s_optima.csv' %
-                 lower_group.replace(' ', '_').lower()),
-        index=False)
     return
 
 #########################################################
@@ -1024,17 +1197,19 @@ def find_cell_type_markers(X,
 #########################################################
 
 
-def predict_cell_types(X: np.ndarray,
-                       model_path: str,
-                       out_path: str,
-                       upper_groups: Union[list, np.ndarray] = None,
-                       lower_group_labels: list = None,
-                       **kwargs) -> None:
+def predict_cell_types(
+    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    model_path: str,
+    out_path: str,
+    upper_groups: Union[list, np.ndarray] = None,
+    lower_group_labels: list = None,
+    **kwargs,
+) -> None:
     '''Predict cell types using a pretrained model
 
     Parameters
     ----------
-    X : np.ndarray
+    X : np.ndarray, sparse.csr.csr_matrix
         [Cells, Genes] of log1p transformed, normalized values.
         log1p and normalization performed using scanpy defaults.
     model_path : str
@@ -1068,14 +1243,16 @@ def predict_cell_types(X: np.ndarray,
         print('Assuming independent model')
 
     # Intantiate a prediction object, which handles batch processing
-    P = Predicter(model_weights=model_path,
-                  n_genes=X.shape[1],
-                  n_cell_types=None,  # infer cell type # from weights
-                  labels=lower_group_labels,
-                  **kwargs)
+    P = Predicter(
+        model_weights=model_path,
+        n_genes=X.shape[1],
+        n_cell_types=None,  # infer cell type # from weights
+        labels=lower_group_labels,
+        **kwargs,
+    )
 
     predictions, names, scores = P.predict(X, output='score')
-    
+
     probabilities = F.softmax(torch.from_numpy(scores), dim=1)
     probabilities = probabilities.cpu().numpy()
 
@@ -1092,11 +1269,51 @@ def predict_cell_types(X: np.ndarray,
 
 
 #########################################################
+# utilities
+#########################################################
+
+
+def load_data(
+    path: str,
+) -> Union[np.ndarray, sparse.csr.csr_matrix]:
+    '''Load a counts matrix from a file path.
+
+    Parameters
+    ----------
+    path : str
+        path to [npy, csv, h5ad, loom] file.
+
+    Returns
+    -------
+    X : np.ndarray
+        [Cells, Genes] matrix.
+    '''
+    if osp.splitext(path)[-1] == '.npy':
+        print('Assuming sparse matrix...')
+        X_raw = np.load(path, allow_pickle=True)
+        X_raw = X_raw.item()
+    elif osp.splitext(path)[-1] == '.csv':
+        X_raw = np.loadtxt(path, delimiter=',')
+    elif osp.splitext(path)[-1] == '.h5ad':
+        adata = sc.read_h5ad(path)
+        X_raw = utils.get_adata_asarray(adata=adata)
+    elif osp.splitext(path)[-1] == '.loom':
+        adata = sc.read_loom(path)
+        X_raw = utils.get_adata_asarray(adata=adata)
+    else:
+        raise ValueError('unrecognized file type %s for counts' %
+                         osp.splitext(path)[-1])
+
+    return X_raw
+
+#########################################################
 # main()
 #########################################################
 
+
 def main():
     import configargparse
+    import yaml
     parser = configargparse.ArgParser(
         description='Train cell type classifiers',
         default_config_files=['./configs/default_config.txt'])
@@ -1145,16 +1362,50 @@ def main():
                         help='number of hidden layers in the model')
     parser.add_argument('--residual', action='store_true',
                         help='use residual layers in the model')
+    parser.add_argument('--track_running_stats', type=bool, default=True,
+                       help='track running statistics in batch normalization layers')
     parser.add_argument('--model_path', type=str, default=None,
                         help='path to pretrained model weights \
                         for class marker identification.')
     parser.add_argument('--weight_decay', type=float, default=1e-5,
                         help='weight decay applied by the optimizer')
+    parser.add_argument('--lr', type=float, default=1.0,
+                        help='learning rate for the optimizer.')
+    parser.add_argument('--optimizer', type=str, default='adadelta',
+                       help='optimizer to use. {adadelta, adam}.')
     parser.add_argument('--l1_reg', type=float, default=1e-4,
                         help='l1 regularization strength \
                         for class marker identification')
-    parser.add_argument('--balance_classes', type=bool, default=True,
-                        help='perform class balancing')
+    parser.add_argument('--weight_classes', type=bool, default=False,
+                        help='weight loss based on relative class abundance.')
+    parser.add_argument('--balance_classes', type=bool, default=False,
+                        help='perform class balancing.')
+    parser.add_argument('--mixup_alpha', type=float, default=None,
+                        help='alpha parameter for MixUp training. \
+                        if set performs MixUp, otherwise does not.')
+    parser.add_argument('--unlabeled_counts', type=str, default=None,
+                        help='path to unlabeled data [Cells, Genes]. \
+                       [npy, csv, h5ad, loom]. \
+                       if provided, uses interpolation consistency training.')
+    parser.add_argument('--unlabeled_genes', type=str, default=None,
+                        help='path to gene names for the unlabeled data.\
+                       if not provided, assumes same as `input_counts`.')
+    parser.add_argument('--unsup_max_weight', type=float, default=2.,
+                        help='maximum weight for the unsupervised component of IC training.')
+    parser.add_argument('--unsup_mean_teacher', action='store_true',
+                        help='use a mean teacher for IC training.')
+    parser.add_argument(
+        '--ssl_method',
+        type=str,
+        default='mixmatch',
+        help='semi-supervised learning method to use. {"mixmatch", "ict"}.',
+    )
+    parser.add_argument(
+        '--ssl_config',
+        type=str,
+        default=None,
+        help='path to a YAML configuration file of kwargs for the SSL method.'
+    )
     args = parser.parse_args()
 
     print(args)
@@ -1165,7 +1416,6 @@ def main():
         'train_tissue_dependent',
         'train_tissue_specific',
         'predict_cell_types',
-        'find_cell_type_markers',
     ]
 
     if args.command not in COMMANDS:
@@ -1175,34 +1425,7 @@ def main():
     # LOAD DATA
     #####################################
 
-    if osp.splitext(args.input_counts)[-1] == '.npy':
-        print('Assuming sparse matrix...')
-        X_raw = np.load(args.input_counts, allow_pickle=True)
-        X_raw = X_raw.item()
-    elif osp.splitext(args.input_counts)[-1] == '.csv':
-        X_raw = np.loadtxt(args.input_counts, delimiter=',')
-    elif osp.splitext(args.input_counts)[-1] == '.h5ad':
-        adata = sc.read_h5ad(args.input_counts)
-        X_raw = adata.X
-    elif osp.splitext(args.input_counts)[-1] == '.loom':
-        adata = sc.read_loom(args.input_counts)
-        X_raw = adata.X
-    else:
-        raise ValueError('unrecognized file type %s for `input_counts`' %
-                         osp.splitext(args.input_counts)[-1])
-
-    if type(X_raw) != np.ndarray:
-        # If X_raw is not np.ndarray, we assume it's part of the
-        # scipy.sparse family and use the `.toarray()` method
-        # to densify the matrix.
-        print('Assuming sparse matrix, densifying...')
-        try:
-            X_raw = X_raw.toarray()
-        except RuntimeError:
-            print(
-                'Counts object was neither `np.ndarray` or matrix with `.toarray()` method.')
-            print('Ensure that the counts you load are either a dense `np.ndarray` \
-                or part of the `scipy.sparse` family of matrices.')
+    X_raw = load_data(args.input_counts)
 
     print('Loaded data.')
     print('%d cells and %d genes in raw data.' % X_raw.shape)
@@ -1228,13 +1451,54 @@ def main():
 
     # Load metadata and identify output classes
     metadata = pd.read_csv(args.training_metadata,)
-    lower_groups = sorted(list(set(metadata[args.lower_group])))
+    lower_groups = np.unique(metadata[args.lower_group]).tolist()
 
+    # Load any provided unlabeled data for semi-supervised learning
+    if args.unlabeled_counts is not None:
+        unlabeled_counts = load_data(args.unlabeled_counts)
+        print('%d cells, %d genes in unlabeled data.' % unlabeled_counts.shape)
+        
+        # parse any semi-supervised learning specific parameters
+        if args.ssl_config is not None:
+            print(f'Loading Semi-Supervised Learning parameters for {args.ssl_method}')
+            with open(args.ssl_config, 'r') as f:
+                ssl_kwargs = yaml.load(f, Loader=yaml.Loader)
+            print('SSL kwargs:')
+            for k, v in ssl_kwargs.items():
+                print(f'{k}\t\t:\t\t{v}')
+            print()
+        else:
+            ssl_kwargs = {}
+        
+    else:
+        unlabeled_counts = None
+        ssl_kwargs = {}
+
+    if args.unlabeled_genes is not None and unlabeled_counts is not None:
+        # Contruct a matrix using the unlabeled counts where columns
+        # correspond to the same gene in `input_counts`.
+        print('Subsetting unlabeled counts to genes used for training...')
+        unlabeled_genes = np.loadtxt(
+            args.unlabeled_genes,
+            delimiter=',',
+            dtype='str',
+        )
+        unlabeled_counts = utils.build_classification_matrix(
+            X=unlabeled_counts,
+            model_genes=genes_to_use,
+            sample_genes=unlabeled_genes,
+        )
+
+    # prepare output paths
     if not os.path.exists(args.out_path):
         os.mkdir(args.out_path)
 
-    sub_dirs = ['tissues', 'tissue_independent',
-                'tissue_dependent', 'tissue_ind_class_optimums']
+    sub_dirs = [
+        'tissues', 
+        'tissue_independent_no_dropout',
+        'tissue_dependent', 
+        'tissue_ind_class_optimums',
+    ]
     for sd in sub_dirs:
         if not os.path.exists(osp.join(args.out_path, sd)):
             os.mkdir(osp.join(args.out_path, sd))
@@ -1244,37 +1508,60 @@ def main():
     #####################################
 
     if args.command == 'train_tissue_independent':
-        train_tissue_independent_cv(X,
-                                    metadata,
-                                    osp.join(args.out_path,
-                                             'tissue_independent'),
-                                    balanced_classes=args.balance_classes,
-                                    batch_size=args.batch_size,
-                                    n_epochs=args.n_epochs,
-                                    init_dropout=args.init_dropout,
-                                    lower_group=args.lower_group,
-                                    n_hidden=args.n_hidden,
-                                    n_layers=args.n_layers,
-                                    weight_decay=args.weight_decay,
-                                    residual=args.residual)
+        train_tissue_independent_cv(
+            X,
+            metadata,
+            osp.join(args.out_path, 'tissue_independent'),
+            balanced_classes=args.balance_classes,
+            weighted_classes=args.weight_classes,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            init_dropout=args.init_dropout,
+            lower_group=args.lower_group,
+            n_hidden=args.n_hidden,
+            n_layers=args.n_layers,
+            lr=args.lr,
+            optimizer_name=args.optimizer,
+            weight_decay=args.weight_decay,
+            residual=args.residual,
+            track_running_stats=args.track_running_stats,
+            mixup_alpha=args.mixup_alpha,
+            unlabeled_counts=unlabeled_counts,
+            unsup_max_weight=args.unsup_max_weight,
+            unsup_mean_teacher=args.unsup_mean_teacher,
+            ssl_method=args.ssl_method,
+            ssl_kwargs=ssl_kwargs,
+        )
 
     #####################################
     # TISSUE DEPENDENT CLASSIFIERS
     #####################################
 
     if args.command == 'train_tissue_dependent':
-        train_tissue_dependent_cv(X,
-                                  metadata,
-                                  osp.join(args.out_path, 'tissue_dependent'),
-                                  balanced_classes=args.balance_classes,
-                                  batch_size=args.batch_size,
-                                  n_epochs=args.n_epochs,
-                                  upper_group=args.upper_group,
-                                  lower_group=args.lower_group,
-                                  n_hidden=args.n_hidden,
-                                  n_layers=args.n_layers,
-                                  weight_decay=args.weight_decay,
-                                  residual=args.residual)
+        train_tissue_dependent_cv(
+            X,
+            metadata,
+            osp.join(args.out_path, 'tissue_dependent'),
+            balanced_classes=args.balance_classes,
+            weighted_classes=args.weight_classes,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            upper_group=args.upper_group,
+            lower_group=args.lower_group,
+            n_hidden=args.n_hidden,
+            n_layers=args.n_layers,
+            lr=args.lr,
+            optimizer_name=args.optimizer,
+            weight_decay=args.weight_decay,
+            residual=args.residual,
+            track_running_stats=args.track_running_stats,
+            mixup_alpha=args.mixup_alpha,
+            unlabeled_counts=unlabeled_counts,
+            unsup_max_weight=args.unsup_max_weight,
+            unsup_mean_teacher=args.unsup_mean_teacher,
+            ssl_method=args.ssl_method,
+            ssl_kwargs=ssl_kwargs,
+        )
 
     #####################################
     # TISSUE SPECIFIC CLASSIFIERS
@@ -1285,42 +1572,34 @@ def main():
         tissue_specific_bal = {
             k: False for k in set(metadata[args.upper_group])}
         if args.balance_classes:
+            print(args.balance_classes)
             for k in tissue_specific_bal:
                 tissue_specific_bal[k] = True
+            print('Balancing classes on a tissue specific basis')
+            print(tissue_specific_bal)
 
-        train_tissue_specific_cv(X,
-                                 metadata,
-                                 osp.join(args.out_path, 'tissues'),
-                                 balanced_classes=tissue_specific_bal,
-                                 batch_size=args.batch_size,
-                                 n_epochs=args.n_epochs,
-                                 upper_group=args.upper_group,
-                                 lower_group=args.lower_group,
-                                 n_hidden=args.n_hidden,
-                                 n_layers=args.n_layers,
-                                 weight_decay=args.weight_decay,
-                                 residual=args.residual)
-
-    #####################################
-    # INPUT OPTIMIZATION
-    #####################################
-
-    if args.command == 'find_cell_type_markers':
-        if args.model_path is None:
-            raise ValueError('`model_path` required.')
-        model_path = args.model_path
-        find_cell_type_markers(X,
-                               metadata,
-                               model_path=model_path,
-                               out_path=osp.join(
-                                   args.out_path, 'tissue_ind_class_optimums'),
-                               genes_to_use=genes_to_use,
-                               reg_strength=args.l1_reg,
-                               upper_group=args.upper_group,
-                               lower_group=args.lower_group,
-                               n_hidden=args.n_hidden,
-                               n_layers=args.n_layers,
-                               residual=args.residual)
+        train_tissue_specific_cv(
+            X,
+            metadata,
+            osp.join(args.out_path, 'tissues'),
+            balanced_classes=tissue_specific_bal,
+            weighted_classes=args.weight_classes,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            upper_group=args.upper_group,
+            lower_group=args.lower_group,
+            n_hidden=args.n_hidden,
+            n_layers=args.n_layers,
+            lr=args.lr,
+            optimizer_name=args.optimizer,
+            weight_decay=args.weight_decay,
+            residual=args.residual,
+            track_running_stats=args.track_running_stats,
+            unlabeled_counts=unlabeled_counts,
+            unsup_max_weight=args.unsup_max_weight,
+            unsup_mean_teacher=args.unsup_mean_teacher,
+            ssl_method=args.ssl_method,
+         )
 
     #####################################
     # PRETRAINED MODEL PREDICTION
@@ -1337,15 +1616,19 @@ def main():
         X = utils.build_classification_matrix(
             X=X,
             model_genes=training_genes,
-            sample_genes=gene_names)
+            sample_genes=gene_names,
+        )
 
-        predict_cell_types(X,
-                           model_path=args.model_path,
-                           out_path=args.out_path,
-                           lower_group_labels=lower_groups,
-                           n_hidden=args.n_hidden,
-                           n_layers=args.n_layers,
-                           residual=args.residual)
+        predict_cell_types(
+            X,
+            model_path=args.model_path,
+            out_path=args.out_path,
+            lower_group_labels=lower_groups,
+            n_hidden=args.n_hidden,
+            n_layers=args.n_layers,
+            residual=args.residual,
+        )
+
 
 #########################################################
 # __main__
