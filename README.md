@@ -4,7 +4,7 @@
     <img src="assets/scnym_icon.png" width="368">
 </p>
 
-![](https://github.com/calico/scnym_private/workflows/test-scnym/badge.svg)
+![](https://github.com/calico/scnym/workflows/test-scnym/badge.svg)
 
 `scNym` is a neural network model for predicting cell types from single cell profiling data (e.g. scRNA-seq) and deriving cell type representations from these models. 
 While cell type classification is the main use case, these models can map single cell profiles to arbitrary output classes (e.g. experimental conditions).
