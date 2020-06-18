@@ -262,3 +262,7 @@ source demo_script.sh
 ```
 
 in the repository directory.
+
+## Processed Data
+
+We provide [processed data](assets/processed_data.md) we used to evaluate `scNym` in the common `AnnData` format.
