@@ -98,7 +98,7 @@ $ source scnym_env/bin/activate
 or 
 
 ```bash
-$ conda create -n scnym_env
+$ conda create -n scnym_env -c conda-forge python
 $ conda activate scnym_env
 ```
 
