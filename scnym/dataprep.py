@@ -28,8 +28,10 @@ class SingleCellDS(Dataset):
         self,
         X: Union[sparse.csr.csr_matrix, np.ndarray],
         y: Union[sparse.csr.csr_matrix, np.ndarray],
+        domain: Union[sparse.csr.csr_matrix, np.ndarray] = None,
         transform: Callable = None,
         num_classes: int=-1,
+        num_domains: int=-1,
     ) -> None:
         '''
         Load single cell expression profiles.
@@ -41,8 +43,14 @@ class SingleCellDS(Dataset):
             scNym tools expect ln(Counts Per Million + 1).
         y : np.ndarray, sparse.csr_matrix
             [Cells,] integer cell type labels.
+        domain : np.ndarray, sparse.csr_matrix
+            [Cells,] integer domain labels.
         transform : Callable
             transform to apply to samples.
+        num_classes : int
+            total number of classes for the task.
+        num_domains : int
+            total number of domains for the task.
 
         Returns
         -------
@@ -69,6 +77,16 @@ class SingleCellDS(Dataset):
             self.y_labels,
             num_classes=num_classes,
         ).float()
+        
+        self.dom_labels = domain
+        if self.dom_labels is not None:
+            self.dom = torch.nn.functional.one_hot(
+                torch.from_numpy(self.dom_labels).long(),
+                num_classes=num_domains,
+            ).float()
+        else:
+            self.dom = np.zeros_like(self.y) - 1
+        
         self.transform = transform
 
         if not self.X.shape[0] == self.y.shape[0]:
@@ -128,6 +146,8 @@ class SingleCellDS(Dataset):
             'input': input_,
             'output': label,
         }
+        
+        sample['domain'] = self.dom[idx]
 
         # if a transformer was supplied, apply transformations
         # to the sample vector and label
@@ -610,6 +630,11 @@ class SampleMixUp(object):
             'input' - torch.FloatTensor, input vector
             'output' - torch.LongTensor, target label        
         '''
+        if self.alpha == 0.:
+            # mixup is deactivated, return the original
+            # sample without mixing
+            return sample
+        
         input_ = sample['input']
         output = sample['output']
 

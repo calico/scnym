@@ -54,6 +54,9 @@ def test_trainer():
         n_layers=1,
         init_dropout=0.1,
     )
+    if torch.cuda.is_available():
+        model = model.cuda()
+    
     optimizer = torch.optim.Adadelta(
         model.parameters(),
     )
@@ -83,6 +86,9 @@ def test_trainer():
         n_hidden=128,
         n_layers=1,
     )
+    if torch.cuda.is_available():
+        model = model.cuda()
+    
     optimizer = torch.optim.Adadelta(
         model.parameters(),
     )    
@@ -125,6 +131,9 @@ def test_trainer():
         n_hidden=128,
         n_layers=1,
     )
+    if torch.cuda.is_available():
+        model = model.cuda()
+
     optimizer = torch.optim.Adadelta(
         model.parameters(),
     )    

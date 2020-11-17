@@ -25,10 +25,17 @@ def test_dataset():
         3,
         adata.shape[0],
     )
+    # add fake domain labels
+    adata.obs['domain'] = np.random.randint(
+        0,
+        3,
+        adata.shape[0],
+    )
     
     ds = SingleCellDS(
         X = adata.X.toarray(),
         y = np.array(adata.obs['class']),
+        domain = np.array(adata.obs['domain']),
     )
     
     # draw a sample
@@ -39,6 +46,16 @@ def test_dataset():
     assert np.all(
         sample['input'].numpy() == adata.X[idx, :].toarray().flatten()
     )
+    # ensure the class label is correct
+    y_gt = np.array(adata.obs['class'])[idx]
+    y_onehot = sample['output'].view(1, -1)
+    _, y_ds = torch.max(y_onehot, dim=1)
+    assert np.all(y_ds.item() == y_gt)
+    # ensure the domain label is correct
+    d_gt = np.array(adata.obs['domain'])[idx]
+    d_onehot = sample['domain'].view(1, -1)
+    _, d_ds = torch.max(d_onehot, dim=1)
+    assert np.all(d_ds.item() == d_gt)    
     
     # throw an error by passing an invalid idx
     
@@ -56,7 +73,7 @@ def test_dataset_sparse():
     from scnym.dataprep import SingleCellDS
     from scipy import sparse
     torch.manual_seed(1)
-    np.random.seed(1)    
+    np.random.seed(1)
     
     # load 10x human PBMC data as a sample
     adata = sc.datasets.pbmc3k()
@@ -232,7 +249,8 @@ def test_multinomial_sampling():
             d, 
             2,
         )
-    p = torch.sum(test_norm > rand_norms) / n_tests
+
+    p = torch.sum(test_norm > rand_norms) // n_tests
     
     msg = f'p = {p} suggests something is rotten with multinomial sampling.'
     assert p < 0.05, msg
@@ -406,6 +424,19 @@ def test_mixup():
     
     mixed_batch = mixup_op(batch)
     
+    # test that mixup can be turned off with `alpha = 0.0`
+    batch = next(iter(dl))
+    mixup_op = SampleMixUp(
+        alpha = 0.0,
+        keep_dominant_obs = True,
+    )
+    
+    mixed_batch = mixup_op(batch)
+    
+    assert torch.all(
+        mixed_batch['input'] == batch['input']
+    )
+    
     return
 
 
@@ -445,7 +476,7 @@ def test_augmentation_schemes():
 
 
 def main():
-    test_poisson_sampling()
+    test_mixup()
     return
 
 
