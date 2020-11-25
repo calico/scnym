@@ -8,6 +8,7 @@ from scipy import sparse
 import pandas as pd
 import tqdm
 from scipy import stats
+import scanpy as sc
 from sklearn.neighbors import NearestNeighbors, KNeighborsRegressor
 from sklearn.metrics.pairwise import euclidean_distances
 from typing import Union, Callable
@@ -178,9 +179,10 @@ def build_classification_matrix(
         raise TypeError(msg)
     n_cells = X.shape[0]
     # check if gene names already match exactly
-    if np.all(model_genes == sample_genes):
-        print('Gene names match exactly, returning input.')
-        return X
+    if len(model_genes) == len(sample_genes):
+        if np.all(model_genes == sample_genes):
+            print('Gene names match exactly, returning input.')
+            return X
     
     # instantiate a new [Cells, model_genes] matrix where columns
     # retain the order used during training
@@ -641,3 +643,86 @@ def compute_entropy_of_mixing(
         H = stats.entropy(nn_y_p)
         entropy_of_mixing[i] = H
     return entropy_of_mixing
+
+
+'''Find new cell state based on scNym confidence scores'''
+
+from sklearn.metrics import calinski_harabasz_score
+def _optimize_clustering(adata, resolution: list=[0.1, 0.2, 0.3, 0.5, 1.0]):
+    scores = []
+    for r in resolution:
+        sc.tl.leiden(adata, resolution=r)
+        s = calinski_harabasz_score(adata.obsm['X_scnym'], adata.obs['leiden'])
+        scores.append(s)
+    cl_opt_df = pd.DataFrame({'resolution': resolution, 'score': scores})
+    best_idx = np.argmax(cl_opt_df['score'])
+    res = cl_opt_df.iloc[best_idx, 0]
+    sc.tl.leiden(adata, resolution=res)
+    print('Best resolution: ', res)
+    return cl_opt_df
+
+
+def find_low_confidence_cells(
+    adata: anndata.AnnData,
+    confidence_threshold: float=0.5,
+    confidence_key: str='Confidence',
+    use_rep: str='X_scnym',
+    n_neighbors: int=15,
+) -> pd.DataFrame:
+    '''Find cells with low confidence predictions and suggest a potential
+    number of cell states within the low confidence cell population.
+    
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        [Cells, Genes] experiment containing an scNym embedding and scNym
+        confidence scores.
+    confidence_threshold : float
+        threshold for low confidence cells.
+    confidence_key : str
+        key in `adata.obs` containing confidence scores.
+    use_rep : str
+        tensor in `adata.obsm` containing the scNym embedding.
+    n_neighbors : int
+        number of nearest neighbors to use for NN graph construction
+        prior to community detection.
+    
+    Returns
+    -------
+    None.
+    Adds `adata.uns["scNym_low_confidence_cells"]`, a `dict` containing
+    keys `"cluster_optimization", "n_clusters", "embedding"`.
+    Adds key to `adata.obs["scNym_low_confidence_cluster"]`.
+    
+    Notes
+    -----
+    '''
+    # identify low confidence cells
+    adata.obs['scNym Discovery'] = (
+        adata.obs[confidence_key] < confidence_threshold
+    ).astype(bool)
+    low_conf_bidx = adata.obs['scNym Discovery']
+    
+    # embed low confidence cells
+    lc_ad = adata[adata.obs['scNym Discovery'], :].copy()
+    sc.pp.neighbors(lc_ad, use_rep=use_rep, n_neighbors=n_neighbors)
+    sc.tl.umap(lc_ad, min_dist=0.3)
+    
+    cl_opt_df = _optimize_clustering(lc_ad)
+    
+    lc_embed = lc_ad.obs.copy()
+    for k in range(1, 3):
+        lc_embed[f'UMAP{k}'] = lc_ad.obsm['X_umap'][:, k-1]
+    
+    # set the outputs
+    adata.uns['scNym_low_confidence_cells'] = {
+        'cluster_optimization' : cl_opt_df,
+        'n_clusters' : len(np.unique(lc_ad.obs['leiden'])),
+        'embedding': lc_embed,
+    }
+    adata.obs['scNym_low_confidence_cluster'] = 'High Confidence'
+    adata.obs.loc[
+        low_conf_bidx,
+        'scNym_low_confidence_cluster',
+    ] = lc_ad.obs['leiden'].apply(lambda x : f'Low Confidence {x}')
+    return

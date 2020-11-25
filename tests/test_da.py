@@ -240,7 +240,7 @@ def test_dan_pseudoconf():
 
 def test_dan_train():
     '''Test training a DANN on fake data that is easy
-    to discriminate'''
+    to discriminate from three fake domains'''
     import scnym
     torch.manual_seed(1)
     np.random.seed(1)    
@@ -255,14 +255,15 @@ def test_dan_train():
     )
     
     # create fake data from cell type A
-    A = torch.randn(size=(32, 3))
+    A = torch.randn(size=(48, 3))
     # create fake data from cell type B
-    B = torch.randn(size=(32, 3)) + 5
+    B = torch.randn(size=(48, 3)) + 5
     
     # setup the DAN loss
     dan = scnym.trainer.DANLoss(
         model=model,
         dan_criterion=scnym.trainer.cross_entropy,
+        n_domains = 3,
     )
     
     # create datasets and loaders
@@ -272,26 +273,47 @@ def test_dan_train():
     y_0[16:] = 1
     
     
-    # shift X_1 into a new domain
-    X_1 = torch.cat([A[16:], B[16:]], dim=0)
+    # shift X_1 into a new domain 1
+    X_1 = torch.cat([A[16:32], B[16:32]], dim=0)
     y_1 = torch.zeros(32)
     y_1[16:] = 1
     
     X_1 = X_1 + 1000.
     
+    # shift X_2 into new domain 2
+    X_2 = torch.cat([A[32:], B[32:]], dim=0)
+    y_2 = torch.zeros(32)
+    y_2[16:] = 1
+    
+    X_2 = X_2 - 1000.
+    
     # pack into samples
+    labeled_domain = torch.cat(
+        [torch.zeros(32), torch.ones(32)],
+    ).long()
+    labeled_domain = torch.nn.functional.one_hot(
+        labeled_domain, 
+        num_classes=3,
+    )
     labeled_sample = {
-        'input': X_0,
-        'output': y_0,
+        'input': torch.cat([X_0, X_2], 0),
+        'output': torch.cat([y_0, y_2], 0),
+        'domain': labeled_domain,
     }
+    unlabeled_domain = (torch.zeros(32) + 2).long()
+    unlabeled_domain = torch.nn.functional.one_hot(unlabeled_domain, num_classes=3)
     unlabeled_sample = {
         'input': X_1,
         'output': y_1,
+        'domain': unlabeled_domain,
     }
     
     print('Fake data:')
     print(labeled_sample['input'][:5])
-    print(unlabeled_sample['input'][:5])    
+    print(unlabeled_sample['input'][:5])
+    print('Fake domains:')
+    print(labeled_sample['domain'][:5])
+    print(unlabeled_sample['domain'][:5])    
     
     # compute dan loss
     l = dan(
@@ -414,6 +436,6 @@ def test_dan_train():
 
 
 if __name__ == '__main__':
-    test_dan_pseudoconf()
-    print()
+    #test_dan_pseudoconf()
+    #print()
     test_dan_train()

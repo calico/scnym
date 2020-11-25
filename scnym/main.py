@@ -66,7 +66,7 @@ def repeater(data_loader):
 def fit_model(
     X: Union[np.ndarray, sparse.csr.csr_matrix],
     y: np.ndarray,
-    traintest_idx: np.ndarray,
+    traintest_idx: Union[np.ndarray, tuple],
     val_idx: np.ndarray,
     batch_size: int,
     n_epochs: int,
@@ -84,6 +84,12 @@ def fit_model(
     ssl_kwargs: dict={},
     weighted_classes: bool = False,
     balanced_classes: bool = False,
+    input_domain: np.ndarray=None,
+    unlabeled_domain: np.ndarray=None,
+    pretrained: str=None,
+    patience: int=None,
+    save_freq: int=None,
+    tensorboard: bool=True,
     **kwargs,
 ) -> (float, float):
     '''Fit an scNym model given a set of observations and labels.
@@ -97,6 +103,8 @@ def fit_model(
         [Cells,] integer class labels.
     traintest_idx : np.ndarray
         [Int,] indices to use for training and early stopping.
+        a single array will be randomly partitioned, OR a tuple
+        of `(train_idx, test_idx)` can be passed.
     val_idx : np.ndarray
         [Int,] indices to hold-out for final model evaluation.
     n_epochs : int
@@ -120,6 +128,9 @@ def fit_model(
         the input matrix has been concatenated with other features.
     mixup_alpha : float
         alpha parameter for an optional MixUp augmentation during training.
+    unlabeled_counts : np.ndarray
+        [Cells', Genes] of log1p transformed normalized values for 
+        unlabeled observations.
     unsup_max_weight : float
         maximum weight for the unsupervised loss term.
     unsup_mean_teacher : bool
@@ -133,6 +144,21 @@ def fit_model(
     weighted_classes : bool
         weight loss for each class based on relative abundance of classes
         in the training data.
+    input_domain : np.ndarray
+        [Cells,] integer domain labels for training data.
+    unlabeled_domain : np.ndarray
+        [Cells',] integer domain labels for unlabeled data.
+    pretrained : str
+        path to a pretrained model for initialization.
+        default: `None`.
+    patience : int
+        number of epochs to wait before early stopping.
+        `None` deactivates early stopping.
+    save_freq : int
+        frequency in epochs for saving model checkpoints.
+        if `None`, saves >=5 checkpoints per model.
+    tensorboard : bool
+        save logs to tensorboard.
         
     Returns
     -------
@@ -146,20 +172,29 @@ def fit_model(
     if n_genes is None:
         n_genes = X.shape[1]
         
-    # Set aside 10% of the traintest data for model selection in `test_idx`
-    train_idx = np.random.choice(traintest_idx,
-                                 size=int(
-                                     np.floor(0.9 * len(traintest_idx))),
-                                 replace=False).astype('int')
-    test_idx = np.setdiff1d(traintest_idx, train_idx).astype('int')
+    if type(traintest_idx) != tuple:
+        # Set aside 10% of the traintest data for model selection in `test_idx`
+        train_idx = np.random.choice(
+            traintest_idx,
+             size=int(
+                 np.floor(0.9 * len(traintest_idx))),
+             replace=False,
+        ).astype('int')
+        test_idx = np.setdiff1d(traintest_idx, train_idx).astype('int')
+    elif type(traintest_idx) == tuple and len(traintest_idx) == 2:
+        # use the user provided train/test split
+        train_idx = traintest_idx[0]
+        test_idx  = traintest_idx[1]
+    else:
+        # the user supplied an invalid argument
+        msg = '`traintest_idx` of type {type(traintest_idx)}\n'
+        msg += 'and length {len(traintest_idx)} is invalid.'
+        raise ValueError(msg)
+        
     # save indices to CSVs for later retrieval
     np.savetxt(osp.join(out_path, 'train_idx.csv'), train_idx)
     np.savetxt(osp.join(out_path, 'test_idx.csv'), test_idx)
     np.savetxt(osp.join(out_path, 'val_idx.csv'), val_idx)
-
-    # subset to traintest matrices
-    X_traintest = X[traintest_idx, :]
-    y_traintest = y[traintest_idx]
 
     # balance or weight classes if applicable
     if balanced_classes and weighted_classes:
@@ -213,16 +248,39 @@ def fit_model(
 
     X_test = X[test_idx, :]
     y_test = y[test_idx]
+    
+    # count the number of domains
+    if (input_domain is None) and (unlabeled_domain is None):
+        n_domains = 2
+    elif (input_domain is not None) and (unlabeled_domain is not None):
+        n_domains = int(np.max([
+            input_domain.max(), unlabeled_domain.max(),
+        ])) + 1
+    else:
+        msg = 'domains supplied for only one set of data'
+        raise ValueError(msg)
+    print(f'Found {n_domains} unique domains.')
+    
+    if input_domain is not None:
+        d_train = input_domain[train_idx]
+        d_test  = input_domain[test_idx]
+    else:
+        d_train = None
+        d_test  = None
 
     train_ds = SingleCellDS(
         X=X_train,
         y=y_train,
         num_classes=len(np.unique(y)),
+        domain = d_train,
+        num_domains = n_domains,
     )
     test_ds = SingleCellDS(
         X_test,
         y_test,
         num_classes=len(np.unique(y)),
+        domain = d_test,
+        num_domains = n_domains,
     )
 
     train_dl = DataLoader(
@@ -230,6 +288,7 @@ def fit_model(
         batch_size=batch_size,
         shuffle=True if sampler is None else False,
         sampler=sampler,
+        drop_last=True,
     )
     test_dl = DataLoader(
         test_ds,
@@ -254,6 +313,16 @@ def fit_model(
         n_cell_types=n_cell_types,
         **kwargs,
     )
+    
+    if pretrained is not None:
+        # initialize with supplied weights
+        model.load_state_dict(
+            torch.load(
+                pretrained,
+                map_location='cpu',
+            )
+        )
+    
     if torch.cuda.is_available():
         model = model.cuda()
 
@@ -306,11 +375,12 @@ def fit_model(
         'batch_transformers': batch_transformers,
         'n_epochs': n_epochs,
         'min_epochs': n_epochs//20,
-        'save_freq': max(n_epochs//5, 1),
+        'save_freq': max(n_epochs//5, 1) if save_freq is None else save_freq,
         'reg_criterion': None,
         'exp_name': osp.basename(out_path),
         'verbose': False,
-        'tb_writer' : osp.join(out_path, 'tblog'),
+        'tb_writer' : osp.join(out_path, 'tblog') if tensorboard else None,
+        'patience': patience,
     }
 
     if unlabeled_counts is None:
@@ -318,16 +388,18 @@ def fit_model(
         T = Trainer(**trainer_kwargs)
     else:
         # perform semi-supervised training
-
-        # Build a semi-supervised data loader that oversamples
-        # unsupervised data for interpolation consistency.
-        # This allows us to loop through the labeled data iterator
-        # without running out of unlabeled batches.
         unsup_dataset = SingleCellDS(
             X=unlabeled_counts,
             y=np.zeros(unlabeled_counts.shape[0]),
-            num_classes=len(np.unique(y)),                
+            num_classes=len(np.unique(y)),
+            domain=unlabeled_domain,
+            num_domains=n_domains,
         )
+        
+        # Build a semi-supervised data loader that infinitely samples
+        # unsupervised data for interpolation consistency.
+        # This allows us to loop through the labeled data iterator
+        # without running out of unlabeled batches.        
         unsup_dataloader = DataLoader(
             unsup_dataset,
             batch_size=batch_size,
@@ -409,11 +481,13 @@ def fit_model(
         dan_criterion = ssl_kwargs.get('dan_criterion', None)
         if dan_criterion is not None:
             # initialize the DAN Loss
+            
             dan_criterion = DANLoss(
                 model=model,
                 dan_criterion=cross_entropy,
                 use_conf_pseudolabels=ssl_kwargs.get('dan_use_conf_pseudolabels', False),
                 scale_loss_pseudoconf=ssl_kwargs.get('dan_scale_loss_pseudoconf', False),
+                n_domains = n_domains,
             )
 
             # setup the DANN learning rate schedule
@@ -472,7 +546,11 @@ def fit_model(
         y_val,
         num_classes=len(np.unique(y)),            
     )
-    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False,)
+    val_dl = DataLoader(
+        val_ds, 
+        batch_size=batch_size, 
+        shuffle=False, 
+    )
 
     # Without recording any gradients to speed things up,
     # predict classes for all held out data and evaluate metrics.
@@ -1350,6 +1428,13 @@ def main():
     parser.add_argument('--genes_to_use', type=str, default=None,
                         help='path to a text file of genes to use for training. \
                        must be a subset of genes in `training_gene_names`')
+    parser.add_argument(
+        '--input_domain_group',
+        type=str,
+        help='column in `training_metadata` that specifies domain of origin for each training observation.',
+        required=False,
+        default=None,
+    )
     parser.add_argument('--batch_size', type=int, default=256,
                         help='batch size for training')
     parser.add_argument('--n_epochs', type=int, default=256,
@@ -1390,6 +1475,13 @@ def main():
     parser.add_argument('--unlabeled_genes', type=str, default=None,
                         help='path to gene names for the unlabeled data.\
                        if not provided, assumes same as `input_counts`.')
+    parser.add_argument(
+        '--unlabeled_domain',
+        type=str,
+        help='path to a CSV of integer domain labels for each data point in `unlabeled_counts`.',
+        required=False,
+        default=None,
+    )
     parser.add_argument('--unsup_max_weight', type=float, default=2.,
                         help='maximum weight for the unsupervised component of IC training.')
     parser.add_argument('--unsup_mean_teacher', action='store_true',
@@ -1452,6 +1544,16 @@ def main():
     # Load metadata and identify output classes
     metadata = pd.read_csv(args.training_metadata,)
     lower_groups = np.unique(metadata[args.lower_group]).tolist()
+    
+    # load domain labels if applicable
+    if args.input_domain_group is not None:
+        if args.input_domain_group not in metadata.columns:
+            msg = f'{args.input_domain_group} is not a column in `training_metadata`'
+            raise ValueError(msg)
+        else:
+            input_domain = np.array(metadata[args.input_domain_group])
+    else:
+        input_domain = None
 
     # Load any provided unlabeled data for semi-supervised learning
     if args.unlabeled_counts is not None:
@@ -1488,6 +1590,14 @@ def main():
             model_genes=genes_to_use,
             sample_genes=unlabeled_genes,
         )
+        if args.unlabeled_domain is not None:
+            unlabeled_domain = np.loadtxt(
+                args.unlabeled_domain,
+            ).astype(np.int)
+        else:
+            unlabeled_domain = None
+    else:
+        unlabeled_domain = None
 
     # prepare output paths
     if not os.path.exists(args.out_path):
@@ -1531,6 +1641,8 @@ def main():
             unsup_mean_teacher=args.unsup_mean_teacher,
             ssl_method=args.ssl_method,
             ssl_kwargs=ssl_kwargs,
+            input_domain=input_domain,
+            unlabeled_domain=unlabeled_domain,
         )
 
     #####################################
@@ -1561,6 +1673,8 @@ def main():
             unsup_mean_teacher=args.unsup_mean_teacher,
             ssl_method=args.ssl_method,
             ssl_kwargs=ssl_kwargs,
+            input_domain=input_domain,
+            unlabeled_domain=unlabeled_domain,
         )
 
     #####################################
@@ -1599,6 +1713,8 @@ def main():
             unsup_max_weight=args.unsup_max_weight,
             unsup_mean_teacher=args.unsup_mean_teacher,
             ssl_method=args.ssl_method,
+            input_domain=input_domain,
+            unlabeled_domain=unlabeled_domain,
          )
 
     #####################################

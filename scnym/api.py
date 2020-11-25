@@ -11,8 +11,7 @@ weights from our cloud storage bucket.
 atlas2target() downloads preprocessed reference datasets and concatenates
 them onto a user supplied target dataset.
 """
-from typing import Optional, Union
-
+from typing import Optional, Union, List
 from anndata import AnnData
 import scanpy as sc
 import numpy as np
@@ -23,10 +22,14 @@ import os.path as osp
 import copy
 import pickle
 import warnings
+import itertools
+import pprint
 # for fetching pretrained weights, all in standard lib
 import requests
 import json
 import urllib
+# for data splits
+from sklearn.model_selection import StratifiedKFold
 # from scnym
 from . import utils
 from . import model
@@ -56,6 +59,7 @@ TASKS = (
 CONFIGS = {
     'default' : {
         'n_epochs': 100,
+        'patience': 40,
         'lr': 1.0,
         'optimizer_name': 'adadelta',
         'weight_decay': 1e-4,
@@ -75,6 +79,7 @@ CONFIGS = {
             'dan_criterion': True,
             'dan_ramp_epochs': 20,
             'dan_max_weight': 0.1,
+            'min_epochs': 20,
         },
         'model_kwargs' : {
             'n_hidden': 256,
@@ -82,6 +87,7 @@ CONFIGS = {
             'init_dropout': 0.0,
             'residual': False,
         },
+        'tensorboard': False,
     },
 }
 
@@ -140,6 +146,8 @@ def scnym_api(
     ----------
     adata
         Annotated data matrix used for training or prediction.
+        If `"scNym_split"` in `.obs_keys()`, uses the cells annotated 
+        `"train", "val"` to select data splits.
     task
         Task to perform, either "train" or "predict".
         If "train", uses `adata` as labeled training data.
@@ -152,13 +160,9 @@ def scnym_api(
     out_path
         Path to a directory for saving scNym model weights and training logs.
     trained_model
-        Used when `task=="predict"'.
         Path to the output directory of an scNym training run
         or a string specifying a pretrained model.
-        Pretrained model strings are f"pretrained_{species}" where
-        species is one of `{"human", "mouse", "rat"}`.
-        Providing a pretrained model string will download pre-trained weights
-        and predict directly on the target data, without additional training.
+        If provided while `task == "train"`, used as an initialization. 
     config
         Configuration name or dictionary of configuration of parameters.
         Pre-defined configurations:
@@ -217,21 +221,11 @@ def scnym_api(
     ...   config='no_new_identity',
     ... )
     
-    **Predict cell identities with a pretrained scNym model**
-    
-    >>> scnym_api(
-    ...   adata=adata,
-    ...   task='predict',
-    ...   groupby='scNym',
-    ...   trained_model='pretrained_human',
-    ...   config='no_new_identity',
-    ... )
-    
     **Perform semi-supervised training with an atlas**
     
     >>> joint_adata = atlas2target(
     ...   adata=adata,
-    ...   species='human',
+    ...   species='mouse',
     ...   key_added='annotations',
     ... )
     >>> scnym_api(
@@ -262,7 +256,7 @@ def scnym_api(
         # config is a dictionary of parameters
         # add or update default parameters based on these
         dconf = CONFIGS['default']
-        for k in config:
+        for k in config.keys():
             dconf[k] = config[k]
         config = dconf
 
@@ -282,6 +276,51 @@ def scnym_api(
     config['groupby']   = groupby
     config['key_added'] = key_added
     config['trained_model'] = trained_model
+    
+    ################################################
+    # check that there are no duplicate genes in the input object
+    ################################################
+    n_genes = adata.shape[1]
+    n_unique_genes = len(np.unique(adata.var_names))
+    if n_genes != n_unique_genes:
+        msg = 'Duplicate Genes Error\n'
+        msg += 'Not all genes passed to scNym were unique.\n'
+        msg += f'{n_genes} genes are present but only {n_unique_genes} unique genes were detected.\n'
+        msg += 'Please use unique gene names in your input object.\n'
+        msg += 'This can be achieved by running `adata.var_names_make_unique()`'
+        raise ValueError(msg)
+        
+    ################################################
+    # check that `adata.X` are log1p(CPM) counts
+    ################################################
+    # we can't directly check if cells were normalized to CPM because
+    # users may have filtered out genes *a priori*, so the cell sum
+    # may no longer be ~= 1e6.
+    # however, we can check that our assumptions about log normalization
+    # are true.
+    
+    # check that the min/max are within log1p(CPM) range
+    x_max = np.max(adata.X) > np.log1p(1e6)
+    x_min = np.min(adata.X) < 0.
+    
+    # check to see if a user accidently provided raw counts
+    if type(adata.X) == np.ndarray:
+        int_counts = np.equal(np.mod(adata.X, 1), 0)
+    else:
+        int_counts = np.all(np.equal(np.mod(adata.X.data, 1), 0))    
+    
+    if x_max or x_min or int_counts:
+        msg = 'Normalization error\n'
+        msg += '`adata.X` does not appear to be log(CountsPerMillion+1) normalized data.\n'
+        msg += 'Please replace `adata.X` with log1p(CPM) values.\n'
+        msg += '>>> # starting from raw counts in `adata.X`\n'
+        msg += '>>> sc.pp.normalize_total(adata, target_sum=1e6))\n'
+        msg += '>>> sc.pp.log1p(adata)'
+        raise ValueError(msg)
+        
+    ################################################
+    # check inputs and launch the appropriate task
+    ################################################
     
     if task == 'train':
         # pass parameters to training routine
@@ -382,13 +421,87 @@ def scnym_train(
         
     print('X: ', X.shape)
     print('y: ', y.shape)
+    
+    if 'scNym_split' not in adata.obs_keys():
+        # perform a 90/10 train test split
+        traintest_idx = np.random.choice(
+            X.shape[0],
+            size=int(np.floor(0.9*X.shape[0])),
+            replace=False
+        )
+        val_idx = np.setdiff1d(np.arange(X.shape[0]), traintest_idx)
+    else:
+        train_idx = np.where(
+            train_adata.obs['scNym_split'] == 'train'
+        )[0]
+        test_idx = np.where(
+            train_adata.obs['scNym_split'] == 'test',
+        )[0]
+        val_idx = np.where(
+            train_adata.obs['scNym_split'] == 'val'
+        )[0]
         
-    traintest_idx = np.random.choice(
-        X.shape[0],
-        size=int(np.floor(0.9*X.shape[0])),
-        replace=False
-    )
-    val_idx = np.setdiff1d(np.arange(X.shape[0]), traintest_idx)
+        if len(train_idx) < 100 or len(test_idx) < 10 or len(val_idx) < 10:
+            msg = 'Few samples in user provided data split.\n'
+            msg += f'{len(train_idx)} training samples.\n'
+            msg += f'{len(test_idx)} testing samples.\n'
+            msg += f'{len(val_idx)} validation samples.\n'
+            msg += 'Halting.'
+            raise RuntimeError(msg)
+        # `fit_model()` takes a tuple of `traintest_idx`
+        # as a training index and testing index pair.
+        traintest_idx = (
+            train_idx,
+            test_idx,
+        )
+        
+    # check if domain labels were manually specified
+    if config.get('domain_groupby', None) is not None:
+        domain_groupby = config['domain_groupby']
+        # check that the column actually exists
+        if domain_groupby not in adata.obs.columns:
+            msg = f'no column {domain_groupby} exists in `adata.obs`.\n'
+            msg += 'if domain labels are specified, a matching column must exist.'
+            raise ValueError(msg)
+        # get the label indices as unique integers using pd.Categorical
+        # to code each unique label with an int
+        domains = np.array(
+            pd.Categorical(
+                adata.obs[domain_groupby],
+                categories=np.unique(adata.obs[domain_groupby]),
+            ).codes,
+            dtype=np.int32,
+        )
+        # split domain labels into source and target sets for `fit_model`
+        input_domain = domains[~target_bidx]
+        unlabeled_domain = domains[target_bidx]
+        print('Using user provided domain labels.')
+        n_source_doms = len(np.unique(input_domain))
+        n_target_doms = len(np.unique(unlabeled_domain))
+        print(
+            f'Found {n_source_doms} source domains and {n_target_doms} target domains.'
+        )
+    else:
+        # no domains manually supplied, providing `None` to `fit_model`
+        # will treat source data as one domain and target data as another
+        input_domain = None
+        unlabeled_domain = None
+        
+    # check if pre-trained weights should be used to initialize the model
+    if config['trained_model'] is None:
+        pretrained = None
+    elif 'pretrained_' in config['trained_model']:
+        msg = 'pretrained model fetching is not supported for training.'
+        raise NotImplementedError(msg)
+    else:
+        # setup a prediction model
+        pretrained = osp.join(
+            config['trained_model'],
+            '00_best_model_weights.pkl',
+        )
+        if not osp.exists(pretrained):
+            msg = f'{pretrained} file not found.'
+            raise FileNotFoundError(msg)
         
     acc, loss = main.fit_model(
         X=X,
@@ -404,10 +517,16 @@ def scnym_train(
         out_path=config['out_path'],
         mixup_alpha=config['mixup_alpha'],
         unlabeled_counts=unlabeled_counts,
+        input_domain=input_domain,
+        unlabeled_domain=unlabeled_domain,
         unsup_max_weight=config['unsup_max_weight'],
         unsup_mean_teacher=config['unsup_mean_teacher'],
         ssl_method=config['ssl_method'],
         ssl_kwargs=config['ssl_kwargs'],
+        pretrained=pretrained,
+        patience=config.get('patience', None),
+        save_freq=config.get('save_freq', None),
+        tensorboard=config.get('tensorboard', False),
         **config['model_kwargs'],
     )
     
@@ -421,6 +540,8 @@ def scnym_train(
         'class_names': class_names,
         'gene_names': adata.var_names.tolist(),
         'model_kwargs': config['model_kwargs'],
+        'traintest_idx': traintest_idx,
+        'val_idx': val_idx,
     }
     assert osp.exists(results['model_path'])
     
@@ -470,12 +591,15 @@ def scnym_predict(
     '''
     # check if a pretrained model was requested
     if 'pretrained_' in config['trained_model']:
-        species = get_pretrained_weights(
-            trained_model=config['trained_model'],
-            out_path=config['out_path'],
-        )
-        print(f'Successfully downloaded pretrained model for {species}.')
-        config['trained_model'] = config['out_path']
+        msg = 'Pretrained Request Error\n'
+        msg += 'Pretrained weights are no longer supported in scNym.\n'
+        raise NotImplementedError(msg)
+#         species = _get_pretrained_weights(
+#             trained_model=config['trained_model'],
+#             out_path=config['out_path'],
+#         )
+#         print(f'Successfully downloaded pretrained model for {species}.')
+#         config['trained_model'] = config['out_path']
     
     # load training parameters
     with open(
@@ -555,7 +679,7 @@ def scnym_predict(
     return
 
 
-def get_pretrained_weights(
+def _get_pretrained_weights(
     trained_model: str,
     out_path: str,
 ) -> str:
@@ -762,3 +886,508 @@ def list_configs():
         print(f'name: {k}')
         print('\t'+CONFIGS[k]['description'])
     return
+
+
+def _get_keys_and_list(d: dict) -> (List[list], List[list]):
+    '''Get a set of keys mapping to a list in a
+    nested dictionary structure and the list value.
+    
+    Parameters
+    ----------
+    d : dict
+        a nested dictionary structure where all terminal
+        values are lists.
+    
+    Returns
+    -------
+    keys : List[list]
+        sequential keys required to access a set of 
+        associated terminal values.
+        mapped by index to `values`.
+    values : List[list]
+        lists of terminal values, each accessed by the
+        set of `keys` with a matching index from `d`.
+    '''
+    accession_keys = []
+    associated_values = []
+    for k in d.keys():
+        if type(d[k])==dict:
+            # the value is nested, recurse
+            keys, values = _get_keys_and_list(d[k])
+            keys = [[k,]+x for x in keys]
+        else:
+            keys = [[k],]
+            values = [d[k]]
+        
+        for i in range(len(values)):
+            accession_keys.append(keys[i])
+            associated_values.append(values[i])
+
+    return accession_keys, associated_values
+
+
+def _updated_nested(d: dict, keys: list, value: list) -> dict:
+    '''Updated the values in a dictionary with multiple nested levels.
+    
+    Parameters
+    ----------
+    d : dict
+        multilevel dictionary.
+    keys : list
+        sequential keys specifying a value to update
+    value : list
+        new value to use in the update.
+    
+    Returns
+    -------
+    d : dict
+        updated dictionary.
+    '''
+    if type(d.get(keys[0], None)) == dict:
+        # multilevel, recurse
+        _updated_nested(d[keys[0]], keys[1:], value)
+    else: 
+        d[keys[0]] = value
+    return
+
+
+def split_data(
+    adata: AnnData,
+    groupby: str,
+    n_splits: int,
+) -> None:
+    '''Split data using a stratified k-fold.
+    
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        [Cells, Genes] experiment.
+    groupby : str
+        annotation column in `.obs`.
+        used for stratification.
+    n_splits : int
+        number of train/test/val splits to perform for tuning.
+        performs at least 5-fold splitting and uses a subset of
+        the folds if `n_splits < 5`.
+        
+    Returns
+    -------
+    None. Adds `f"scNym_split_{n}"` to `adata.obs` for all `n`
+    in `[0, n_splits)`.
+    '''
+    # generate cross val splits
+    cv = StratifiedKFold(
+        n_splits=max(5, n_splits), 
+        shuffle=True,
+    )
+    split_indices = list(
+        cv.split(adata.X, adata.obs[groupby])
+    )
+
+    for split_number, train_test in enumerate(split_indices):
+
+        train_idx = train_test[0]
+        testval_idx = train_test[1]
+
+        test_idx = np.random.choice(
+            testval_idx,
+            size=int(np.ceil(len(testval_idx)/2)),
+            replace=False,
+        )
+        val_idx = np.setdiff1d(
+            testval_idx,
+            test_idx,
+        )
+
+        # these tokens are recognized by `api.scnym_train`
+        adata.obs[f'scNym_split_{split_number}'] = 'ERROR'
+        adata.obs.loc[
+            adata.obs_names[train_idx], f'scNym_split_{split_number}'
+        ] = 'train'
+        adata.obs.loc[
+            adata.obs_names[test_idx], f'scNym_split_{split_number}'
+        ] = 'test'    
+        adata.obs.loc[
+            adata.obs_names[val_idx], f'scNym_split_{split_number}'
+        ] = 'val'
+
+    return
+
+
+def _circular_train(
+    search_config: dict,
+    params: tuple,
+    adata: AnnData,
+    groupby: str,
+    out_path: str,
+    accession_keys: List[list],
+    hold_out_only: bool,
+    groupby_eval: str,
+) -> pd.DataFrame:
+    '''
+    Perform a circular training loop for a parameter set.
+    
+    Parameters
+    ----------
+    search_config : tuple
+        configuration for parameter search.
+    params : tuple
+        search parameter values
+    adata : anndata.AnnData
+        [Cells, Genes] experiment for optimization.
+    groupby : str
+        annotation column in `.obs`.
+    accession_keys : List[list]
+        sequential keys required to access a set of 
+        associated terminal values.
+        mapped by index to `values`.
+    hold_out_only : bool
+        evaluate the circular accuracy only on a held-out set of 
+        training data, not used in the training of the first
+        source -> target model.        
+
+    Returns
+    -------
+    search_df : pd.DataFrame
+        [1, (params,) + (acc,)]
+    search_config : dict
+        adjusted configuration file for this parameter search.
+    '''
+    search_number = search_config['search_number']
+    split_number  = search_config['split_number']
+    # fit the source2target
+    s2t_out_path = osp.join(out_path, f'search_{search_number:04}_split_{split_number:04}_source2target')
+    adata = adata.copy()
+    
+    print('\n>>>\nTraining source2target model\n>>>\n')
+    scnym_api(
+        adata=adata,
+        groupby=groupby,
+        task='train',
+        out_path=s2t_out_path,
+        config=search_config,
+    )
+    
+    # load the hold out test acc
+    with open(osp.join(s2t_out_path, 'scnym_train_results.pkl'), 'rb') as f:
+        s2t_res = pickle.load(f)
+        s2t_source_test_acc = s2t_res['final_acc']
+
+    print('\n>>>\nPredicting with source2target model\n>>>\n')
+    # predict on the target set
+    scnym_api(
+        adata=adata,
+        task='predict',
+        trained_model=s2t_out_path,
+        config=search_config,
+    )
+
+    # invert the problem -- train on the new labels
+    circ_adata = adata.copy()
+    circ_adata.obs[groupby] = adata.obs['scNym']
+    circ_adata.obs.drop(columns=['scNym'], inplace=True)
+    # set the training data as unlabeled, leaving labels only on the target data
+    circ_adata.obs.loc[adata.obs[groupby]!=UNLABELED_TOKEN, groupby] = UNLABELED_TOKEN
+
+    # fit a new model
+    t2s_out_path = osp.join(out_path, f'search_{search_number:04}_split_{split_number:04}_target2source')
+    
+    print('\n>>>\nTraining target2source model\n>>>\n')
+    
+    scnym_api(
+        adata=circ_adata,
+        groupby=groupby,
+        task='train',
+        out_path=t2s_out_path,
+        config=search_config,
+    )
+
+    # predict with new model
+    print('\n>>>\nPredicting with target2source model\n>>>\n')    
+    scnym_api(
+        adata=circ_adata,
+        task='predict',
+        trained_model=t2s_out_path,
+        config=search_config,
+    )
+
+    # evaluate the model
+    samples_bidx = adata.obs[groupby]!='Unlabeled'
+    samples_bidx = (
+        samples_bidx & (adata.obs['scNym_split']=='val') if hold_out_only else samples_bidx
+    )
+    y_true = np.array(adata.obs[groupby])[samples_bidx]
+    y_pred = np.array(circ_adata.obs['scNym'])[samples_bidx]
+
+    n_correct = np.sum(y_true==y_pred)
+    n_total = len(y_true)
+    acc = n_correct/n_total
+
+    accession_keys_str = [
+        '::'.join(x) for x in accession_keys
+    ]
+    search_df = pd.DataFrame(
+        columns = accession_keys_str + ['acc'],
+        index=[search_number],
+    )
+    search_df.loc[search_number] = params + (acc,)
+    search_df['test_source_acc'] = s2t_source_test_acc
+    
+    if groupby_eval is not None:
+        # compute the test accuracy in the target domain
+        # here, we use the predictions made by the source2target
+        # model stored in `adata.obs["scNym"]`.
+        samples_bidx = adata.obs[groupby]=='Unlabeled'
+        y_true = np.array(adata.obs[groupby_eval])[samples_bidx]
+        y_pred = np.array(adata.obs['scNym'])[samples_bidx]
+        n_correct = np.sum(y_true == y_pred)
+        test_acc = n_correct/len(y_true)
+        search_df['test_target_acc'] = 'None'
+        search_df.loc[search_number, 'test_target_acc'] = test_acc
+    
+    search_df.to_csv(osp.join(t2s_out_path, 'result.csv'))
+
+    return search_df
+
+
+def scnym_tune(
+    adata: AnnData,
+    groupby: str,
+    parameters: dict,
+    search: str='grid',
+    base_config: str='no_new_identity',
+    n_points: int=100,
+    out_path: str='./scnym_tune',
+    hold_out_only: bool=True,
+    groupby_eval: str=None,
+    n_splits: int=1,
+) -> (pd.DataFrame, dict):
+    '''Perform hyperparameter tuning of an scNym model using 
+    circular cross-validation.
+    
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        [Cells, Genes] experiment for optimization.
+    groupby : str
+        annotation column in `.obs`.
+    parameters : dict
+        key:List[value] pairs of parameters to use for 
+        hyperparameter tuning.
+    base_config : str
+        one of {"no_new_identity", "new_identity_discovery"}.
+        base configuration for model training that described
+        default parameters, not explicitly provided in
+        `parameters`.
+    search : str
+        {"grid", "random"} perform either a random or grid
+        search over `parameters`.        
+    n_points : int
+        number of random points to search if `search == "random"`.
+    out_path : str
+        path for intermediary files during hyperparameter tuning.
+    hold_out_only : bool
+        evaluate the circular accuracy only on a held-out set of 
+        training data, not used in the training of the first
+        source -> target model.
+    groupby_eval : str
+        column in `adata.obs` containing ground truth labels
+        for the "Unlabeled" dataset to use for evaluation.
+    n_splits : int
+        number of train/test/val splits to perform for tuning.
+        performs at least 5-fold splitting and uses a subset of
+        the folds if `n_splits < 5`.
+        
+    Returns
+    -------
+    tuning_results : pd.DataFrame
+        [n_points, (parameters,) + (circ_acc, circ_loss)]
+    best_parameter_set : dict
+        a configuration describing the best parameter set tested.
+        
+    Examples
+    --------
+    >>> # `adata` contains labels in `.obs["annotations"]` where
+    ... # the target dataset is labeled "Unlabeled"
+    >>> tuning_results, best_parameters = scnym_tune(
+    ...   adata=adata,
+    ...   groupby="annotations",
+    ...   parameters={
+    ...     "weight_decay": [1e-6, 1e-5, 1e-4],
+    ...     "unsup_max_weight": [0.1, 1., 10.],
+    ...   },
+    ...   base_config="no_new_identity",
+    ...   search="grid",
+    ...   out_path="./scnym_tuning",
+    ...  n_splits=5,
+    ... )
+        
+    Notes
+    -----
+    Circular/Reverse cross-validation evaluates the impact of hyperparameter
+    selection in semi-supervised learning settings using the training data,
+    training labels, and target data, but not the target labels.
+    
+    This is achieved by training a model :math:`f` on the training set, then 
+    predicting "pseudolabels" for the target set.
+    A second model :math:`g` is then trained on the target data and
+    the associated pseudolabels.
+    The model :math:`g` is used to predict labels for the *training* set.
+    The accuracy of this "reverse" prediction is then used as an estimate
+    of the effectiveness of a hyperparameter set.
+    '''
+    os.makedirs(out_path, exist_ok=True)
+    
+    # get the base configuration dict
+    # configurations have one layer of nested dictionaries within
+    config = CONFIGS.get(base_config, None)
+    if config is None:
+        msg = f'{base_config} is not a valid base configuration.'
+        raise ValueError(msg)
+        
+    #################################################
+    # get all possible combinations of parameters
+    #################################################
+    # `_get_keys_and_list` traverses a nested dictionary and
+    # returns a List[list] of sequential keys to access each
+    # item in `parameter_ranges`.
+    # items in `parameter_ranges: List[list]` are lists of 
+    # values for the parameter specified in `accession_keys`.
+    accession_keys, parameter_ranges = _get_keys_and_list(
+        parameters
+    )
+    # find all possible combinations of parameters
+    # each item in `param_sets` is a tuple of parameter values
+    # each element in the tuple matches the keys in `keys` with 
+    # the same index.
+    param_sets = list(
+        itertools.product(
+            *parameter_ranges,
+        )
+    )
+    
+    #################################################
+    # select a set of parameters to search
+    #################################################
+    if search.lower() == 'random':
+        # perform a random search by subsetting grid points
+        param_idx = np.random.choice(
+            len(param_sets),
+            size=n_points,
+            replace=False,
+        )
+    else:
+        param_idx = range(len(param_sets))
+        
+    #################################################
+    # set a common train/test/val split for all params
+    #################################################
+    
+    splits_provided = (
+        'scNym_split_0' in adata.obs.columns
+    )
+    splits_provided = (
+        splits_provided or 'scNym_split' in adata.obs.columns
+    )
+    
+    if not splits_provided:
+        split_data(
+            adata,
+            groupby=groupby,
+            n_splits=n_splits,
+        )
+    elif n_splits == 1 and 'scNym_split' in adata.obs.columns:
+        adata.obs['scNym_split_0'] = adata.obs['scNym_split']
+    elif n_splits > 1 and splits_provided:
+        # check that we have the relevant split for each fold
+        splits_correct = True
+        for s in range(n_splits):
+            splits_correct = (
+                splits_correct & (f'scNym_split_{s}' in adata.obs.columns)
+            )
+        if not splits_correct:
+            msg = '"scNym_split_" was provided with `n_splits>1.\n'
+            msg += 'f"scNym_split_{n}"" must be present in `adata.obs` for all {n} in `range(n_splits)`\n'
+            raise ValueError(msg)
+    else:
+        msg = 'invalid argument for n_splits'
+        raise ValueError(msg)
+
+    #################################################
+    # circular training for each parameter set
+    #################################################
+    
+    accession_keys_str = [
+        '::'.join(x) for x in accession_keys
+    ]
+    
+    search_results = []
+    search_config_store = []
+    for search_number, idx in enumerate(param_idx):
+        # get the parameter set
+        params = param_sets[idx]
+        # update the base config with search parameters
+        search_config = copy.deepcopy(config)
+        for p_i in range(len(params)):
+            keys2update = accession_keys[p_i]
+            value2set   = params[p_i]
+            # updates in place
+            _updated_nested(
+                search_config,
+                keys2update,
+                value2set,
+            )
+        
+        # disable checkpoints, tensorboard to reduce I/O
+        search_config['save_freq'] = 10000
+        search_config['tensorboard'] = False
+        # add search number to config
+        search_config['search_number'] = search_number
+        
+        search_config_store.append(
+            copy.deepcopy(search_config),
+        )
+        print('searching config:')
+        pprint.pprint(search_config)
+        
+        for split_number in range(n_splits):
+            # set the relevant split indices
+            adata.obs['scNym_split'] = (
+                adata.obs[f'scNym_split_{split_number}']
+            )
+            # set the split number
+            split_config = copy.deepcopy(search_config)
+            split_config['split_number'] = split_number
+            search_df = _circular_train(
+                search_config=split_config,
+                params=params,
+                adata=adata,
+                groupby=groupby,
+                out_path=out_path,
+                accession_keys=accession_keys,
+                hold_out_only=hold_out_only,
+                groupby_eval=groupby_eval,
+            )
+            # add the split information
+            search_df['split_number'] = split_number
+            search_df['search_number'] = search_number
+            # save results
+            search_results.append(search_df)
+        
+            print('search results:')
+            print(search_df)
+    
+    # concatenate
+    search_results = pd.concat(search_results, 0)
+    best_idx = np.argmax(search_results['acc'])
+    best_search = int(
+        search_results.iloc[best_idx]['search_number']
+    )
+    
+    best_config = search_config_store[best_search]
+    print('>>>>>>')
+    print('Best config')
+    print(best_config)
+    print('>>>>>>')
+    print()
+    return search_results, best_config

@@ -33,6 +33,13 @@ class Trainer(object):
         output path for best model.
     n_epochs : int
         number of epochs for training.
+    min_epochs : int
+        minimum number of epochs before saving weights.
+    patience : int
+        maximum number of epochs to wait before early stopping.
+        if `None`, infinite patience is used (up to `n_epochs`).
+    waiting_time : int
+        number of epochs since the last best val loss.
     reg_criterion : Callable
         criterion to penalize layer weights.
     use_gpu : bool
@@ -54,6 +61,7 @@ class Trainer(object):
         batch_transformers: dict = {},
         n_epochs: int = 50,
         min_epochs: int = 0,
+        patience: int = None,
         exp_name: str = '',
         reg_criterion: Callable = None,
         use_gpu: bool = torch.cuda.is_available(),
@@ -89,6 +97,11 @@ class Trainer(object):
             keys are ['train', 'val'], values are Callable.
         n_epochs : int
             number of epochs for training.
+        min_epochs : int
+            minimum number of epochs before saving weights.
+        patience : int
+            maximum number of epochs to wait before early stopping.
+            if `None`, infinite patience is used (up to `n_epochs`).
         reg_criterion : callable
             criterion to penalize layer weights.
         use_gpu : bool
@@ -109,6 +122,8 @@ class Trainer(object):
         self.criterion = criterion
         self.n_epochs = n_epochs
         self.min_epochs = min_epochs
+        self.patience = patience if patience is not None else n_epochs
+        self.waiting_time = 0
         self.dataloaders = dataloaders
         self.batch_transformers = batch_transformers
         self.out_path = out_path
@@ -198,11 +213,6 @@ class Trainer(object):
             # remake an integer version of the labels for quick checking
             int_labels = torch.argmax(labels, 1)
 
-            if self.verbose:
-                print('Preds:')
-                print(predictions[:10])
-                print('Labels:')
-                print(int_labels[:10])
             correct = torch.sum(predictions.detach() == int_labels.detach())
 
             # compute loss
@@ -226,7 +236,7 @@ class Trainer(object):
             running_corrects += float(correct.item())
             running_total += float(labels.size(0))
 
-            if i % 100 == 0:
+            if i % 100 == 0 and self.verbose:
                 print('Iter : ', i)
                 print('running_loss : ', running_loss / (i + 1))
                 print('running_acc  : ', running_corrects/running_total)
@@ -260,10 +270,11 @@ class Trainer(object):
                 self.epoch,
             )
         
-        print('{} Loss : {:.4f}'.format('train', epoch_loss))
-        print('{} Acc : {:.4f}'.format('train', epoch_acc))
-        print('TRAIN EPOCH corrects: %f | total: %f' %
-              (running_corrects, running_total))
+        if self.verbose:
+            print('{} Loss : {:.4f}'.format('train', epoch_loss))
+            print('{} Acc : {:.4f}'.format('train', epoch_acc))
+            print('TRAIN EPOCH corrects: %f | total: %f' %
+                  (running_corrects, running_total))
 
     @torch.no_grad()
     def val_epoch(self):
@@ -300,7 +311,7 @@ class Trainer(object):
             # remake an integer version of the labels for quick checking
             int_labels = torch.argmax(labels, 1)
             correct = torch.sum(predictions.detach() == int_labels.detach())
-            if self.verbose:
+            if self.verbose > 1:
                 print('PRED\n', predictions[:10, ...])
                 print('LABEL\n', int_labels[:10, ...])
                 print('CORRECT: ', correct)
@@ -316,7 +327,7 @@ class Trainer(object):
             running_corrects += int(correct.item())
             running_total += int(labels.size(0))
 
-            if i % 1 == 10:
+            if i % 1 == 10 and self.verbose > 1:
                 print('Iter : ', i)
                 print('running_loss : ', running_loss / (i + 1))
                 print('running_acc  : ', running_corrects/running_total)
@@ -340,9 +351,13 @@ class Trainer(object):
                 + str(running_loss / (i + 1))
                 + ',val_epoch\n')
 
+        # add one epoch to the waiting time for best loss
+        # if we had a new best loss, the counter is reset below
+        self.waiting_time += 1
         if (epoch_loss < self.best_loss) and (self.epoch >= self.min_epochs):
             self.best_loss = epoch_loss
             self.best_model_wts = self.model.state_dict()
+            self.waiting_time = 0
             torch.save(
                 self.model.state_dict(),
                 os.path.join(self.out_path,
@@ -407,23 +422,31 @@ class Trainer(object):
                     '01_final_model_weights.pkl'
                 ),
             )
-
-
+        if self.verbose:
+            print(f'{self.waiting_time} epochs since last best weights.\n')
+        
         if self.tb_writer is not None:
             self.tb_writer.add_scalar('Loss/val', epoch_loss, self.epoch)
             self.tb_writer.add_scalar('Acc/val', epoch_acc, self.epoch)
             self.tb_writer.flush()
-
-        print('{} Loss : {:.4f}'.format('val', epoch_loss))
-        print('{} Acc : {:.4f}'.format('val', epoch_acc))
-        print('VAL EPOCH corrects: %f | total: %f' %
-              (running_corrects, running_total))
+        
+        if self.verbose:
+            print('{} Loss : {:.4f}'.format('val', epoch_loss))
+            print('{} Acc : {:.4f}'.format('val', epoch_acc))
+            print('VAL EPOCH corrects: %f | total: %f' %
+                  (running_corrects, running_total))
 
     def train(self):
         for epoch in range(self.n_epochs):
             self.epoch = epoch
-            print('Epoch {}/{}'.format(epoch, self.n_epochs - 1))
-            print('-' * 10)
+            msg = f'Epoch {epoch}/{self.n_epochs-1}'
+            p_complete = epoch/self.n_epochs
+            n_bars = int(np.floor(30*p_complete))
+            msg += '|' + '-'*n_bars + '_'*(30-n_bars) + '|'
+            # print a new line so the progress bar isn't overwritten
+            # on the final stdout
+            end_char = '\n' if epoch == (self.n_epochs-1) else '\r'
+            print(msg, end=end_char)
             
             # training epoch
             self.train_epoch()
@@ -435,6 +458,14 @@ class Trainer(object):
             # is now called AFTER `optimizer.step()`
             if self.scheduler is not None:
                 self.scheduler.step()
+                
+            if self.waiting_time > self.patience:
+                # we have waited a sufficient number of epochs
+                # to perform early stopping
+                print('>'*5)
+                print(f'Early stopping at epoch {self.epoch}')
+                print('>'*5)
+                break
 
         self.model.load_state_dict(self.best_model_wts)
         
@@ -526,13 +557,6 @@ class SemiSupervisedTrainer(Trainer):
             
             if btrans is not None:
                 data = btrans(data)
-                
-            if self.verbose:
-                # print batch sizes
-                print('Labeled batch')
-                print(data['input'].size())
-                print('Unlabeled batch')
-                print(unsup_data['input'].size())
             
             if self.use_gpu:
                 # push all the data to the CUDA device
@@ -564,11 +588,7 @@ class SemiSupervisedTrainer(Trainer):
             # check supervised classification accuracy
             _, predictions = torch.max(sup_outputs, 1)
             int_labels = torch.argmax(data['output'], 1)
-            if self.verbose:
-                print('Preds:')
-                print(predictions[:10])
-                print('Labels:')
-                print(int_labels[:10])
+
             correct = torch.sum(predictions.detach() == int_labels.detach())
 
             # compute regularization loss
@@ -605,7 +625,7 @@ class SemiSupervisedTrainer(Trainer):
                 + dan_loss
             )
 
-            if self.verbose:
+            if self.verbose > 1:
                 print('sup.  loss:   ', sup_loss.item())
                 print('usup. loss:   ', unsup_loss.item())
                 print('usup. weight: ', self.unsup_weight(self.epoch))
@@ -631,7 +651,7 @@ class SemiSupervisedTrainer(Trainer):
             running_corrects += float(correct.item())
             running_total += float(data['input'].size(0))
 
-            if i % 100 == 0:
+            if i % 100 == 0 and self.verbose:
                 print('Iter : ', i)
                 print('running_sup_loss : ', running_sup_loss / (i + 1))
                 print('running_uns_loss : ', running_uns_loss / (i + 1))
@@ -780,18 +800,18 @@ class SemiSupervisedTrainer(Trainer):
                     str(epoch_uns_loss) + ',train_epoch_uns\n')
             f.write(str(self.epoch) + ',' + str(i) + ',' +
                     str(self.unsup_weight(self.epoch)) + ',train_epoch_uns_weight\n')
-
-        print('{} Sup. Loss : {:.6f}'.format('train', epoch_sup_loss))
-        print('{} Unsup. Loss : {:.6f}'.format('train', epoch_uns_loss))
-        print('{} Unsup. Weight : {:.6f}'.format(
-            'train', self.unsup_weight(self.epoch)))
-        if self.dan_criterion is not None:
-            print('{} Dom.  Loss : {:.6f}'.format('train', epoch_dom_loss))
-            print(f'train Dom.  Weight : {self.dan_weight(self.epoch)}')
-        print('{} Loss : {:.4f}'.format('train', epoch_loss))
-        print('{} Acc : {:.4f}'.format('train', epoch_acc))
-        print('TRAIN EPOCH corrects: %f | total: %f' %
-              (running_corrects, running_total))
+        if self.verbose:
+            print('{} Sup. Loss : {:.6f}'.format('train', epoch_sup_loss))
+            print('{} Unsup. Loss : {:.6f}'.format('train', epoch_uns_loss))
+            print('{} Unsup. Weight : {:.6f}'.format(
+                'train', self.unsup_weight(self.epoch)))
+            if self.dan_criterion is not None:
+                print('{} Dom.  Loss : {:.6f}'.format('train', epoch_dom_loss))
+                print(f'train Dom.  Weight : {self.dan_weight(self.epoch)}')
+            print('{} Loss : {:.4f}'.format('train', epoch_loss))
+            print('{} Acc : {:.4f}'.format('train', epoch_acc))
+            print('TRAIN EPOCH corrects: %f | total: %f' %
+                  (running_corrects, running_total))
         return
 
 
@@ -1578,6 +1598,8 @@ class DANLoss(object):
         model: CellTypeCLF,
         use_conf_pseudolabels: bool=False,
         scale_loss_pseudoconf: bool=False,
+        n_domains: int=2,
+        **kwargs,
     ) -> None:
         '''Compute a domain adaptation network loss.
         
@@ -1594,17 +1616,28 @@ class DANLoss(object):
         scale_loss_pseudoconf : bool
             scale the weight of the gradients passed to both models based
             on the proportion of confident pseudolabels.
+        n_domains : int
+            number of domains of origin to predict using the adversary.
             
         Returns
         -------
         None.
+        
+        Notes
+        -----
+        **kwargs are passed to `scnym.model.DANN`
+        
+        See Also
+        --------
+        scnym.model.DANN
         '''
         self.dan_criterion = dan_criterion
         
         # build the DANN
         self.dann = DANN(
             model=model,
-            n_domains=2,
+            n_domains=n_domains,
+            **kwargs,
         )
         self.dann.domain_clf = self.dann.domain_clf.to(
             device=next(iter(model.parameters())).device,
@@ -1658,22 +1691,32 @@ class DANLoss(object):
         '''
         
         ########################################
-        # (1) Concatenate batches
+        # (1) Create domain labels
         ########################################
         
-        # create domain labels
-        source_label = torch.zeros(labeled_sample['input'].size(0)).long()
-        source_label = torch.nn.functional.one_hot(
-            source_label, 
-            num_classes=2,
-        )
+        # check if domain labels are provided, if not assume
+        # train and target are separate domains
+        # domain labels of -1 indicate `None` was passed as a domain label
+        # to `SingleCellDS`
+        if torch.sum(labeled_sample.get('domain', torch.Tensor([-1])) == -1) > 0:
+            source_label = torch.zeros(labeled_sample['input'].size(0)).long()
+            source_label = torch.nn.functional.one_hot(
+                source_label, 
+                num_classes=2,
+            )
+        else:
+            # domain labels should already by one-hot
+            source_label = labeled_sample['domain']
         source_label = source_label.to(device=labeled_sample['input'].device)
         
-        target_label = torch.ones(unlabeled_sample['input'].size(0)).long()
-        target_label = torch.nn.functional.one_hot(
-            target_label, 
-            num_classes=2,
-        )
+        if torch.sum(unlabeled_sample.get('domain', torch.Tensor([-1])) == -1) > 0:
+            target_label = torch.ones(unlabeled_sample['input'].size(0)).long()
+            target_label = torch.nn.functional.one_hot(
+                target_label, 
+                num_classes=2,
+            )
+        else:
+            target_label = unlabeled_sample['domain']
         target_label = target_label.to(device=unlabeled_sample['input'].device)
         
         lx = labeled_sample['input']

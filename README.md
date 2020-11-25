@@ -63,25 +63,23 @@ The best way to become acquainted with `scNym` is to walk through one of our int
 We've prepared tutorials using [Google Colab](https://colab.research.google.com/) so that all computation can be performed using free GPUs. 
 You can even analyze data on your cell phone!
 
-### (1) Semi-supervised cell type classification using cell atlas references
+### Semi-supervised cell type classification using cell atlas references
 
 This tutorial demonstrates how to train a semi-supervised `scNym` model using a pre-prepared cell atlas as a training data set and a new data set as the target.
 You can upload your own data through Google Drive to classify cell types in a new experiment.
 
-[**Semi-supervised Training**](https://colab.research.google.com/drive/1-xEwHXq4INTSyqWo8RMT_pzCMZXNalex?usp=sharing)
+[**Transfering labels from a cell atlas**](https://colab.research.google.com/drive/1-xEwHXq4INTSyqWo8RMT_pzCMZXNalex?usp=sharing)
 
 <a href="https://colab.research.google.com/drive/1-xEwHXq4INTSyqWo8RMT_pzCMZXNalex?usp=sharing"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
 
-### (2) Classifying cell types with pre-trained scNym models
+## Transferring annotations across technologies in human PBMCs
 
-We also provide a tutorial that uses pre-trained scNym model weights to classify cell types in your data. 
-These predictions are less accurate than those provided by semi-supervised training with your data, but they are much faster to generate.
+This tutorial shows how to use scNym to transfer annotations across experiments using different sequencing technologies.
+We use human peripheral blood mononuclear cell profiles generated with different versions of the 10x Genomics chemistry for demonstration.
 
-We provide pre-trained weights for mouse, rat, and human cell atlases.
+[**Cross-technology annotation transfer**](https://colab.research.google.com/drive/1qI7HGWvem6kz5KVfnVTFFtupEXodFBT3?usp=sharing)
 
-[**Classification with Pre-trained Models**](https://colab.research.google.com/drive/1GxPG8u6SG42f2kkDgG45wWfGqyJLN2xo?usp=sharing)
-
-<a href="https://colab.research.google.com/drive/1GxPG8u6SG42f2kkDgG45wWfGqyJLN2xo?usp=sharing"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
+<a href="https://colab.research.google.com/drive/1qI7HGWvem6kz5KVfnVTFFtupEXodFBT3?usp=sharing"><img src="https://colab.research.google.com/img/colab_favicon_256px.png" width="128"></a>
 
 ## Installation
 
@@ -187,6 +185,8 @@ It's easy to use the scNym API to transfer labels from these atlases to your own
 The best way to transfer labels is by training an scNym model using your data as the target dataset for semi-supervised learning.
 Below, we demonstrate how to train a model on a cell atlas with your data as the target.
 
+We provide access to cell atlases for the mouse and rat through the scNym API, but we encourage users to thoughfully consider which training data are most appropriate for their experiments.
+
 ```python
 import anndata
 from scnym.api import scnym_api, atlas2target
@@ -213,25 +213,41 @@ scnym_api(
 )
 ```
 
-### Prediction with pre-trained weights
+### Multi-domain training
 
-Fully supervised scNym models don't work quite as well, but prediction is very fast.
-To predict with pretrained weights, simply run the `scnym_api` prediction, but specify `"pretrained_{species}"` as the `trained_model`.
+By default, scNym treats training cells as one domain, and target cells as another.
+scNym also offers the ability to integrate across multiple training and target domains through the domain adversary.
+This feature can be enabled by providing domain labels for each training cell in the `AnnData` object and passing the name of the relevant anntotation column to scNym.
 
 ```python
-import anndata
-from scnym.api import scnym_api
+# load multiple training and target datasets
+# ...
+# set unique labels for each domain
+training_adata_00.obs['domain_label'] = 'train_0'
+training_adata_01.obs['domain_label'] = 'train_1'
 
-# load your data
-adata = anndata.read_h5ad(path_to_your_data)
+target_adata_00.obs['domain_label'] = 'target_0'
+target_adata_01.obs['domain_label'] = 'target_1'
 
-# predict using pre-trained weights
+# set target annotations to "Unlabeled"
+target_adata_00.obs['annotations'] = 'Unlabeled'
+target_adata_01.obs['annotations'] = 'Unlabeled'
+
+# concatenate 
+adata = training_adata_00.concatenate(
+    training_adata_01,
+    target_adata_00,
+    target_adata_01,
+)
+
+# provide the `domain_groupby` argument to `scnym_api`
 scnym_api(
     adata=adata,
-    task='predict',
-    key_added='scNym',
-    trained_model='pretrained_mouse',
+    task='train',
+    groupby='annotations',
+    domain_groupby='domain_label',
     out_path='./scnym_output',
+    config='no_new_identity',
 )
 ```
 

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 import typing
 import copy
+import warnings
 
 
 class Salience(object):
@@ -280,3 +281,262 @@ class Salience(object):
         sort_idx = torch.argsort(s)
         idx = sort_idx[0].numpy()[::-1]
         return self.gene_names[idx.astype(np.int)]
+
+    
+class IntegratedGradient(object):
+    
+    
+    def __init__(
+        self,
+        model: nn.Module,
+        class_names: typing.Union[list, np.ndarray],
+        gene_names: typing.Union[list, np.ndarray] = None,
+        verbose: bool = False,
+    ) -> None:
+        '''Performs integrated gradient computations for feature attribution
+        in scNym models.
+        
+        Parameters
+        ----------
+        model : torch.nn.Module
+            trained scNym model.
+        class_names : list or np.ndarray
+            list of str names matching output nodes in `model`.
+        gene_names : list or np.ndarray, optional
+            gene names for the model.
+        verbose : bool
+            verbose outputs for stdout.
+        
+        Returns
+        -------
+        None.
+        
+        Notes
+        -----
+        Integrated gradients are computed as the path integral between a "baseline"
+        gene expression vector (all 0 counts) and an observed gene expression vector.
+        The path integral is computed along a straight line in the feature space.
+        
+        Stated formally, we define a our baseline gene expression vector as :math:`x`,
+        our observed vector as :math:`x'`, an scnym model :math:`f(\cdot)`, and a 
+        number of steps :math:`M` for approximating the integral by Reimann sums.
+        
+        The integrated gradient :math:`\int \nabla` for a feature :math:`x_i` is then
+        
+        .. math::
+        
+            r = \sum_{m=1}^M \partial f(x' + \frac{m}{M}(x - x')) / \partial x_i \\
+            \int \nabla_i = (x_i' - x_i) \frac{1}{M} r
+        '''
+        self.model = copy.deepcopy(model)
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+            print('Model loaded on CUDA compute device.')
+        self.model.zero_grad()
+        for param in self.model.parameters():
+            param.requires_grad = False        
+        
+        self.class_names = class_names
+        self.gene_names = gene_names
+        self.verbose = verbose
+        
+        if type(self.class_names) == np.ndarray:
+            self.class_names = self.class_names.tolist()
+                
+        return
+    
+    
+    def get_grad(
+        self,
+        x: torch.Tensor,
+        target_class: str,
+    ) -> (torch.Tensor, torch.Tensor):
+        '''Get the gradient for a minibatch of observations with respect
+        to a target class.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            [Batch, Features] input tensor.
+        target_class : str
+            target class for gradient computation.
+            
+        Returns
+        -------
+        grad : torch.Tensor
+            [Batch, Features] feature gradients with respect to the
+            target class.
+        target : torch.Tensor
+            [Batch,] value of the target class score.
+        '''
+        target_idx = self.class_names.index(target_class)
+        
+        # store gradients on the input
+        if torch.cuda.is_available():
+            x = x.cuda()
+        x.requires_grad = True
+    
+        # forward pass through the model
+        output = self.model(x)
+        sm_output = F.softmax(output, dim=-1)
+        
+        # get the softmax output on the target class for each
+        # observation as a loss
+        index = torch.ones(output.size(0)).view(-1, 1) * target_idx
+        index = index.long()
+        index = index.to(device=sm_output.device)
+        # `.gather(dim, index)` takes a dimension number and a tensor
+        # of indices size [Batch,] where each val is an integer index
+        # grabs the specific element for each observation along the given dim.
+        target = sm_output.gather(1, index)
+        
+        # zero any existing gradients
+        self.model.zero_grad()
+        if x.grad is not None:
+            x.grad.zero_()
+        target.backward()
+        
+        grad = x.grad.detach().cpu()
+        
+        return grad, target
+    
+    
+    def _check_integration(
+        self,
+        integrated_grad: torch.Tensor,
+    ) -> bool:
+        '''Check that the approximation of the path integral is appropriate.
+        If we used a sufficient number of steps in the Reimann sum, we should
+        find that the gradient sum is roughly equivalent to the difference in
+        class scores for the baseline vector and target vector.
+        '''
+        score_difference = self.raw_scores[-1] - self.raw_scores[0]
+        check = torch.isclose(
+            integrated_grad.sum(),
+            score_difference,            
+            rtol=0.1,
+        )
+        if not check:
+            msg = 'integrated gradient magnitude does not match the difference in scores.\n'
+            msg += f'magnitude {integrated_grad.sum().item()} vs. {score_difference.item()}.\n'
+            msg += 'consider using more steps to estimate the path integral.'
+            warnings.warn(msg)
+        return check
+    
+    def get_integrated_gradient(
+        self,
+        x: torch.Tensor,
+        target_class: str,
+        M: int=300,
+        baseline: torch.Tensor=None,
+    ) -> torch.Tensor:
+        '''Compute the integrated gradient for a single observation.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            [Features,] input tensor.
+        target_class : str
+            class in `self.class_names` for optimization.
+        M : int
+            number of gradient steps to use when approximating
+            the path integral.
+        baseline : torch.Tensor
+            [Features,] baseline gene expression vector to use.
+            if `None`, uses the `0` vector.
+        
+        Returns
+        -------
+        integrated_grad : torch.Tensor
+            [Features,] integrated gradient tensor.
+            
+        Notes
+        -----
+        1. Define a difference between the baseline input and observation.
+        2. Approximate a linear path between the baseline and observation 
+        with `M` steps.
+        3. Compute the gradient at each step in the path.
+        4. Sum gradients across steps and divide by number of steps.
+        5. Elementwise multiply with input features as in saliency.
+        '''
+        if baseline is None:
+            if self.verbose:
+                print('Using the 0-vector as a baseline.')
+            base = self.baseline_input = torch.zeros(
+                (1, len(self.gene_names))
+            ).float()
+        else:
+            base = self.baseline_input = baseline
+            if base.dim() > 1 and base.size(0) != 1:
+                msg = 'baseline must be a single gene expression vector'
+                raise ValueError(msg)
+            base = base.view(1, -1)
+        
+        self.target_class = target_class
+
+        if x.dim() > 1 and x.size(0) == 1:
+            # tensor has an empty batch dimension, flatten it
+            x = x.view(-1)
+        
+        # create a batch of observations where each observation is
+        # a single step along the path integral
+        path = base.repeat((M, 1))
+        
+        # create a tensor marking the "step number" for each observation
+        step = ( (x - base) / M).view(1, -1)
+        step_coord = torch.arange(1, M+1).view(-1, 1).repeat((1, path.size(1)))
+        
+        # add the correct number of steps to fill the path tensor
+        path += (step * step_coord)
+        
+        if self.verbose:
+            print('baseline', base.size())
+            print(base.sort())
+            print('observation', x.size())
+            print(x.sort())
+            print()
+            print('step : ', step.size())
+            print(step)
+            print('step_coord : ', step_coord.size())
+            print(step_coord)
+            print('path : ', path.size())
+            print(path[0].sort())
+            print('-'*3)
+            print(path[-1].sort())
+                
+        # compute the gradient on the input at each step
+        # along the path
+        gradients = torch.zeros_like(path)
+        scores = torch.zeros(path.size(0))
+    
+        for m in range(M):
+            gradients[m, :], target_scores = self.get_grad(
+                path[m, :].view(1, -1),
+                self.target_class,
+            )
+            scores[m] = target_scores
+
+        self.raw_gradients = gradients
+        self.raw_scores = scores
+        self.path = path
+        
+        # sum gradients and normalize by step number
+        integrated_grad = (x - base) * (gradients.sum(0) / M)
+        
+        self._check_integration(integrated_grad)
+        
+        return integrated_grad
+    
+    
+class Tessaract(IntegratedGradient):
+    
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ) -> None:
+        """Tessaract finds a path from a source vector in feature
+        space to a destination vector that maximizes the likelihood
+        of observing each intermediate position using a trained
+        classification model.
+        """
