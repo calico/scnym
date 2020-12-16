@@ -185,11 +185,13 @@ def test_pretrained():
 
 def test_atlas2target():
     np.random.seed(1)    
-    adata = sc.datasets._datasets.read(sc.settings.datasetdir / 'kang17.h5ad', backup_url=TEST_URL)
+    adata = sc.datasets.paul15()
+    sc.pp.normalize_total(adata, target_sum=1e6)
+    sc.pp.log1p(adata)
     
     joint_adata = atlas2target(
         adata=adata,
-        species='human',
+        species='mouse',
         key_added='annotations',
     )
     
@@ -201,17 +203,19 @@ def test_atlas2target():
 
 def test_sslwithatlas():
     np.random.seed(1) 
-    adata = sc.datasets._datasets.read(sc.settings.datasetdir / 'kang17.h5ad', backup_url=TEST_URL)
+    adata = sc.datasets.paul15()
+    sc.pp.normalize_total(adata, target_sum=1e6)
+    sc.pp.log1p(adata)    
     
     joint_adata = atlas2target(
         adata=adata,
-        species='human',
+        species='mouse',
         key_added='annotations',
     )
     # downsample to speed up the test
     ridx = np.random.choice(
         joint_adata.shape[0],
-        size=10000,
+        size=5000,
         replace=False,
     )
     joint_adata = joint_adata[ridx, :].copy()
