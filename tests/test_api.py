@@ -342,11 +342,12 @@ def test_user_domains():
     print('val   samples = ', np.sum(adata.obs['scNym_split']=='val'))
     
     # train an scNym model
-    config = {'n_epochs': 1, 'domain_groupby': domain_groupby}
+    config = {'n_epochs': 1,}
     scnym_api(
         adata=adata,
         task='train',
         groupby='cell',
+        domain_groupby=domain_groupby,
         out_path=str(sc.settings.datasetdir),
         config=config,
     )
