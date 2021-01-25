@@ -126,6 +126,7 @@ def scnym_api(
     adata: AnnData,
     task: str='train',
     groupby: str=None,
+    domain_groupby: str=None,
     out_path: str='./scnym_outputs',
     trained_model: str=None,
     config: Union[dict, str]='new_identity_discovery',
@@ -157,6 +158,12 @@ def scnym_api(
         Column in `adata.obs` that contains cell identity annotations.
         Values of `"Unlabeled"` indicate that a given cell should be used
         only as unlabeled data during training.
+    domain_groupby
+        Column in `adata.obs` that contains domain labels as integers.
+        Each domain of origin (e.g. batch, species) should be given a unique
+        domain label.
+        If `domain_groupby is None`, train and target data are each considered
+        a unique domain.
     out_path
         Path to a directory for saving scNym model weights and training logs.
     trained_model
@@ -276,6 +283,7 @@ def scnym_api(
     config['groupby']   = groupby
     config['key_added'] = key_added
     config['trained_model'] = trained_model
+    config['domain_groupby'] = domain_groupby
     
     ################################################
     # check that there are no duplicate genes in the input object
