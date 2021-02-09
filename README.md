@@ -49,8 +49,8 @@ Each of these functions have parameters that are learned from data.
 Given a labeled dataset `X` and an unlabeled dataset `U`, `scNym` uses the model to guess "pseudolabels" for each unlabeled observation.
 All observations are then augmented using the "MixUp" weighted averaging method prior to computing losses.
 
-We also introduce a domain adversarial network [(Ganin et. al. 2016)](https://arxiv.org/abs/1505.07818) that predicts the domain of origin (`{target, train}`) for each observation.
-We invert the adversaries gradients during backpropogation so the model learns to "compete" with the adversary by adapting across domains.
+We also introduce a domain adversarial network [(Ganin et. al. 2016)](https://arxiv.org/abs/1505.07818) that predicts the domain of origin (e.g. `{target, train}` or `{method_A, method_B, method_C}`) for each observation.
+We invert the adversary's gradients during backpropogation so the model learns to "compete" with the adversary by adapting across domains.
 Model parameters are then trained to minimize a supervised cross-entropy loss applied to the labeled examples, an unsupervised mean squared error loss applied to the unlabeled examples, and a classification loss across domains for the domain adversary.
 
 <p align="center">
