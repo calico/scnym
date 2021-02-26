@@ -9,27 +9,31 @@
 `scNym` is a neural network model for predicting cell types from single cell profiling data (e.g. scRNA-seq) and deriving cell type representations from these models. 
 While cell type classification is the main use case, these models can map single cell profiles to arbitrary output classes (e.g. experimental conditions).
 
-We've described `scNym` in detail in a recent preprint.  
+We've described `scNym` in detail in a recent paper in *Genome Research*.  
 Please cite our work if you find this tool helpful.  
 We also have a research website that describes `scNym` in brief -- [https://scnym.research.calicolabs.com](https://scnym.research.calicolabs.com)
 
-**scNym: Semi-supervised adversarial neural networks for single cell classification.**  
+**Semi-supervised adversarial neural networks for single cell classification.**  
 Jacob C. Kimmel and David R. Kelley.  
-bioRxiv 2020.06.04.132324; doi: https://doi.org/10.1101/2020.06.04.132324
+*Genome Research*. 2021. doi: https://doi.org/10.1101/gr.268581.120  
 
 **BibTeX**
 
 ```latex
-@article{kimmel_2020_scnym,
-	author = {Kimmel, Jacob C and Kelley, David R},
-	title = {scNym: Semi-supervised adversarial neural networks for single cell classification},
-	elocation-id = {2020.06.04.132324},
-	year = {2020},
-	doi = {10.1101/2020.06.04.132324},
-	publisher = {Cold Spring Harbor Laboratory},
-	URL = {https://www.biorxiv.org/content/early/2020/06/05/2020.06.04.132324},
-	eprint = {https://www.biorxiv.org/content/early/2020/06/05/2020.06.04.132324.full.pdf},
-	journal = {bioRxiv}
+
+@article{kimmel_scnym_2021,
+	title = {Semi-supervised adversarial neural networks for single-cell classification},
+	issn = {1088-9051, 1549-5469},
+	url = {https://genome.cshlp.org/content/early/2021/02/24/gr.268581.120},
+	doi = {10.1101/gr.268581.120},
+	pages = {gr.268581.120},
+	journaltitle = {Genome Research},
+	shortjournal = {Genome Res.},
+	author = {Kimmel, Jacob C. and Kelley, David R.},
+	urldate = {2021-02-26},
+	date = {2021-02-24},
+	langid = {english},
+	pmid = {33627475}
 }
 ```
 
