@@ -313,7 +313,7 @@ def scnym_api(
     
     # check to see if a user accidently provided raw counts
     if type(adata.X) == np.ndarray:
-        int_counts = np.equal(np.mod(adata.X, 1), 0)
+        int_counts = np.all(np.equal(np.mod(adata.X, 1), 0))
     else:
         int_counts = np.all(np.equal(np.mod(adata.X.data, 1), 0))    
     
