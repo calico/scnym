@@ -6,6 +6,9 @@ This function allows for training and prediction using scnym_train()
 and scnym_predict(). Both of these functions will be infrequently 
 accessed by users.
 
+scnym_tune() provides an API for hyperparameter tuning of scNym models
+using reverse cross-validation.
+
 get_pretrained_weights() is a wrapper function that downloads pretrained
 weights from our cloud storage bucket.
 atlas2target() downloads preprocessed reference datasets and concatenates
@@ -406,6 +409,8 @@ def scnym_train(
             categories=np.unique(adata.obs[config['groupby']]),
         ).codes
         class_names = np.unique(adata.obs[config['groupby']])
+        # set all samples for training
+        train_adata = adata
     else:
         print(f'{n_unlabeled} unlabeled observations found.')
         print('Using unlabeled data as a target set for semi-supervised, adversarial training.')
