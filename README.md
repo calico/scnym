@@ -178,6 +178,32 @@ The key is defined by `key_added` and the confidence scores are stored as `adata
 
 The prediction task also extracts the activations of the penultimate scNym layer as an embedding and stores the result in `adata.obsm["X_scnym"]`.
 
+### Interpretation
+
+scNym models can be interpreted using the expected gradients technique to estimate Shapley values [Erion et. al. 2020](https://arxiv.org/abs/1906.10670). Briefly, expected gradient estimation computes the gradient on the predicted output class score with respect an input vector, where the input vector is a random interpolation between an observation `x` and some reference vector `x'`.  
+Intuitively, we are using gradients on the input vector to highlight important genes that influence class predictions.
+We can then rank the importance of various genes using the resulting expected gradient value.
+
+Computing expected gradients in scNym is accomplished with the `scnym_interpret` API endpoint.
+
+```python
+from scnym.api import scnym_interpret
+
+expected_gradients = scnym_interpret(
+    adata=adata,
+    groupby="cell_type",
+    target="target_cell_type",
+    source="all", # use all data except target cells as a reference    
+    trained_model=PATH_TO_TRAINED_MODEL,
+    config=CONFIG_USED_FOR_TRAINING,
+)
+
+# `expected_gradients["saliency"]` is a pandas.Series ranking genes by their mean
+# expected gradient across cells
+# `expected_gradients["gradients"]` is a pd.DataFrame [Cells, Features] table of expected
+# gradient estimates for each feature in each `target` cell
+```
+
 ## Training and predicting with Cell Atlas References
 
 We also provide a set of preprocessed cell atlas references for [human](https://pubmed.ncbi.nlm.nih.gov/32214235/), [mouse](https://pubmed.ncbi.nlm.nih.gov/30283141), and [rat](https://pubmed.ncbi.nlm.nih.gov/32109414/), as well as pretrained weights for each.
