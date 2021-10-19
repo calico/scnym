@@ -31,9 +31,13 @@ from . import utils
 # allow tensorboard outputs even though TF2 is installed
 # TF2 broke the tensorboard/pytorch API, so we need to alias
 # the old API endpoint below
-import tensorflow as tf
+try:
+    import tensorflow as tf
+    tfv = int(tf.__version__.split(".")[0])
+except ImportError:
+    print("tensorflow is not installed, assuming tensorboard is independent")
+    tfv = 1
 
-tfv = int(tf.__version__.split(".")[0])
 if tfv > 1:
     import tensorboard as tb
 
