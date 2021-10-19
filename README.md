@@ -180,7 +180,7 @@ The prediction task also extracts the activations of the penultimate scNym layer
 
 ### Interpretation
 
-scNym models can be interpreted using the expected gradients technique to estimate Shapley values [Erion et. al. 2020](https://arxiv.org/abs/1906.10670). Briefly, expected gradient estimation computes the gradient on the predicted output class score with respect an input vector, where the input vector is a random interpolation between an observation `x` and some reference vector `x'`.  
+scNym models can be interpreted using the expected gradients technique to estimate Shapley values [(Erion et. al. 2020)](https://arxiv.org/abs/1906.10670). Briefly, expected gradient estimation computes the gradient on the predicted output class score with respect to an input vector, where the input vector is a random interpolation between an observation `x` and some reference vector `x'`.  
 Intuitively, we are using gradients on the input vector to highlight important genes that influence class predictions.
 We can then rank the importance of various genes using the resulting expected gradient value.
 
