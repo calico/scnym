@@ -10,7 +10,7 @@ import tqdm
 
 
 class Predicter(object):
-    '''Predict cell types from expression data using `CellTypeCLF`.
+    """Predict cell types from expression data using `CellTypeCLF`.
 
     Attributes
     ----------
@@ -24,7 +24,7 @@ class Predicter(object):
         number of input genes.
     models : list
         `nn.Module` for each set of weights in `.model_weights`.
-    '''
+    """
 
     def __init__(
         self,
@@ -34,7 +34,7 @@ class Predicter(object):
         labels: list = None,
         **kwargs,
     ) -> None:
-        '''
+        """
         Predict cell types using pretrained weights for `CellTypeCLF`.
 
         Parameters
@@ -50,7 +50,7 @@ class Predicter(object):
         labels : list
             string labels corresponding to each cell type output
         **kwargs passed to `model.CellTypeCLF`
-        '''
+        """
         if type(model_weights) == str:
             self.model_weights = [model_weights]
         else:
@@ -59,9 +59,11 @@ class Predicter(object):
 
         if n_cell_types is None:
             # get the number of output nodes from the pretrained model
-            print('Assuming `n_cell_types` is the same as in the \
-            pretrained model weights.')
-            params = torch.load(self.model_weights[0], map_location='cpu')
+            print(
+                "Assuming `n_cell_types` is the same as in the \
+            pretrained model weights."
+            )
+            params = torch.load(self.model_weights[0], map_location="cpu")
             fkey = list(params.keys())[-1]
             self.n_cell_types = len(params[fkey])
         else:
@@ -74,9 +76,11 @@ class Predicter(object):
 
         if n_genes is None:
             # get the number of input genes from the model weights
-            print('Assuming `n_genes` is the same as in the \
-            pretrained model weights.')
-            params = torch.load(model_weights, map_location='cpu')
+            print(
+                "Assuming `n_genes` is the same as in the \
+            pretrained model weights."
+            )
+            params = torch.load(model_weights, map_location="cpu")
             fkey = list(params.keys())[0]
             self.n_genes = params[fkey].shape[1]
         else:
@@ -91,7 +95,7 @@ class Predicter(object):
                 n_cell_types=self.n_cell_types,
                 **kwargs,
             )
-            model.load_state_dict(torch.load(weights, map_location='cpu'))
+            model.load_state_dict(torch.load(weights, map_location="cpu"))
 
             if torch.cuda.is_available():
                 model = model.cuda()
@@ -104,10 +108,10 @@ class Predicter(object):
         self,
         X: Union[np.ndarray, sparse.csr.csr_matrix, torch.FloatTensor],
         output: str = None,
-        batch_size: int=1024,
-         **kwargs,
+        batch_size: int = 1024,
+        **kwargs,
     ) -> (np.ndarray, list):
-        '''
+        """
         Predict cell types given a matrix `X`.
 
         Parameters
@@ -134,18 +138,18 @@ class Predicter(object):
         acceptable **kwarg for legacy compatibility --
         return_prob : bool
             return probabilities as an optional third output.
-        '''
+        """
         if not X.shape[1] == self.n_genes:
             gs = (X.shape[1], self.n_genes)
-            raise ValueError('%d genes in X, %d genes in model.' % gs)
+            raise ValueError("%d genes in X, %d genes in model." % gs)
 
-        if 'return_prob' in kwargs:
-            return_prob = kwargs['return_prob']
+        if "return_prob" in kwargs:
+            return_prob = kwargs["return_prob"]
         else:
             return_prob = None
-            
-        if output not in ['prob', 'score'] and output is not None:
-            msg = f'{output} is not a valid additional output.'
+
+        if output not in ["prob", "score"] and output is not None:
+            msg = f"{output} is not a valid additional output."
             raise ValueError(msg)
 
         # build a SingleCellDS so we can load cells onto the
@@ -163,10 +167,10 @@ class Predicter(object):
         probabilities = []
 
         # For each cell, compute predictions
-        for data in tqdm.tqdm(dl, desc='Finding cell types'):
-            
-            X_batch = data['input']
-            
+        for data in tqdm.tqdm(dl, desc="Finding cell types"):
+
+            X_batch = data["input"]
+
             if torch.cuda.is_available():
                 X_batch = X_batch.cuda()
 
@@ -179,21 +183,15 @@ class Predicter(object):
             out = torch.mean(outs, dim=0)
 
             # save most likely prediction and output probabilities
-            scores.append(
-                out.detach().cpu().numpy()
-            )
-            
+            scores.append(out.detach().cpu().numpy())
+
             _, pred = torch.max(out, 1)
-            predictions.append(
-                pred.detach().cpu().numpy()
-            )
+            predictions.append(pred.detach().cpu().numpy())
 
             probs = F.softmax(out, dim=1)
-            probabilities.append(
-                probs.detach().cpu().numpy()
-            )
+            probabilities.append(probs.detach().cpu().numpy())
 
-        predictions = np.concatenate(predictions, axis=0) # [Cells,]
+        predictions = np.concatenate(predictions, axis=0)  # [Cells,]
         scores = np.concatenate(scores, axis=0)  # [Cells, Types]
         probabilities = np.concatenate(probabilities, axis=0)  # [Cells, Types]
 
@@ -210,9 +208,9 @@ class Predicter(object):
         if return_prob is True:
             return predictions, names, probabilities
         elif output is not None:
-            if output == 'prob':
+            if output == "prob":
                 return predictions, names, probabilities
-            elif output == 'score':
+            elif output == "score":
                 return predictions, names, scores
         else:
             return predictions, names

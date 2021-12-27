@@ -91,16 +91,17 @@ First, clone the repository:
 
 We recommend creating a virtual environment for use with `scNym`. 
 This is easily accomplished using `virtualenv` or `conda`.
+We recommend using `python=3.8` for `scNym`, as some of our dependencies don't currently support the newest Python versions.
 
 ```bash
-$ virtualenv scnym_env
+$ python3 -m venv scnym_env # python3 is python3.8
 $ source scnym_env/bin/activate
 ```
 
 or 
 
 ```bash
-$ conda create -n scnym_env -c conda-forge python
+$ conda create -n scnym_env -c conda-forge python=3.8
 $ conda activate scnym_env
 ```
 
@@ -110,9 +111,10 @@ Once the environment is set up, simply run:
 $ pip install scnym
 ```
 
-After installation completes, you should be able to run `scNym` as a command line tool:
+After installation completes, you should be able to import `scnym` in Python and run `scNym` as a command line tool:
 
 ```bash
+$ python -c "import scnym; print(scnym.__file__)"
 $ scnym --help
 ```
 
@@ -123,18 +125,20 @@ $ scnym --help
 Data inputs for scNym should be `log(CPM + 1)` normalized counts, where CPM is Counts Per Million and `log` is the natural logarithm.
 This transformation is crucial if you would like to use any of our pre-trained model weights, provided in the tutorials above.
 
-Input data can be stored as a dense `[Cells, Genes]` CSV of normalized counts, or in an [AnnData](https://anndata.readthedocs.io/en/stable/) `h5ad` object, or a [Loompy](http://loompy.org/) `loom` object.
+For the recommended Python API interface, data should be formatted as an [AnnData](https://anndata.readthedocs.io/en/stable/) object with normalized counts in the main `.X` observations attribute.
+
+For the command line tool, data can be stored as a dense `[Cells, Genes]` CSV of normalized counts, an [AnnData](https://anndata.readthedocs.io/en/stable/) `h5ad` object, or a [Loompy](http://loompy.org/) `loom` object.
 
 ## Python API
 
-We recommend users take advantange of our python API for scNym, suitable for use in scripts and Jupyter notebooks.
-The API follows the [`scanpy` functional style](https://scanpy.readthedocs.io/en/stable/index.html) and has a single end-point.
+We recommend users take advantange of our Python API for scNym, suitable for use in scripts and Jupyter notebooks.
+The API follows the [`scanpy` functional style](https://scanpy.readthedocs.io/en/stable/index.html) and has a single end-point for training and prediction.
 
-To begin with the python API, load your training and test data into `anndata.AnnData` objects using [`scanpy`](https://scanpy.readthedocs.io/en/stable/index.html).
+To begin with the Python API, load your training and test data into `anndata.AnnData` objects using [`scanpy`](https://scanpy.readthedocs.io/en/stable/index.html).
 
 ### Training
 
-Training an scNym model using the python API is simple.
+Training an scNym model using the Python API is simple.
 We provide an example below.
 
 ```python
@@ -177,6 +181,32 @@ The prediction task adds a key to `adata.obs` that contains the scNym annotation
 The key is defined by `key_added` and the confidence scores are stored as `adata.obs[key_added + '_confidence']`.
 
 The prediction task also extracts the activations of the penultimate scNym layer as an embedding and stores the result in `adata.obsm["X_scnym"]`.
+
+### Interpretation
+
+scNym models can be interpreted using the expected gradients technique to estimate Shapley values [(Erion et. al. 2020)](https://arxiv.org/abs/1906.10670). Briefly, expected gradient estimation computes the gradient on the predicted output class score with respect to an input vector, where the input vector is a random interpolation between an observation `x` and some reference vector `x'`.  
+Intuitively, we are using gradients on the input vector to highlight important genes that influence class predictions.
+We can then rank the importance of various genes using the resulting expected gradient value.
+
+Computing expected gradients in scNym is accomplished with the `scnym_interpret` API endpoint.
+
+```python
+from scnym.api import scnym_interpret
+
+expected_gradients = scnym_interpret(
+    adata=adata,
+    groupby="cell_type",
+    target="target_cell_type",
+    source="all", # use all data except target cells as a reference    
+    trained_model=PATH_TO_TRAINED_MODEL,
+    config=CONFIG_USED_FOR_TRAINING,
+)
+
+# `expected_gradients["saliency"]` is a pandas.Series ranking genes by their mean
+# expected gradient across cells
+# `expected_gradients["gradients"]` is a pd.DataFrame [Cells, Features] table of expected
+# gradient estimates for each feature in each `target` cell
+```
 
 ## Training and predicting with Cell Atlas References
 
@@ -253,6 +283,59 @@ scnym_api(
     out_path='./scnym_output',
     config='no_new_identity',
 )
+```
+
+### Advanced configuration options
+
+We provide two configurations for scNym model training, as noted above. 
+However, users may wish to experiment with different configuration options for new applications of scNym models.
+
+To experiment with custom configuration options, users can simply copy one of the pre-defined configurations and modify as desired.
+All pre-defined configurations are stored as Python dictionaries in `scnym.api.CONFIGS`.
+
+```python
+import scnym
+config = scnym.api.CONFIGS["no_new_identity"]
+# increase the number of training epochs
+config["n_epochs"] = 500
+# increase the weight of the domain adversary 0.1 -> 0.3
+config["ssl_kwargs"]["dan_max_weight"] = 0.3
+
+# descriptions of all parameters and their default values
+"default": {
+    "n_epochs": 100, # number of training epochs
+    "patience": 40, # number of epochs to wait before early stopping
+    "lr": 1.0, # learning rate
+    "optimizer_name": "adadelta", # optimizer
+    "weight_decay": 1e-4, # weight decay for the optimizer
+    "batch_size": 256, # minibatch size
+    "mixup_alpha": 0.3, # shape parameter for MixUp: lambda ~ Beta(alpha, alpha)
+    "unsup_max_weight": 1.0, # maximum weight for the MixMatch loss
+    "unsup_mean_teacher": False, # use a mean teacher for MixMatch pseudolabeling
+    "ssl_method": "mixmatch", # semi-supervised learning method to use
+    "ssl_kwargs": {
+        "augment_pseudolabels": False, # perform augmentations before pseudolabeling
+        "augment": "log1p_drop", # augmentation to use if `augment_pseudolabels`
+        "unsup_criterion": "mse", # criterion fxn for MixMatch loss
+        "n_augmentations": 1, # number of augmentations per observation
+        "T": 0.5, # temperature scaling parameter
+        "ramp_epochs": 100, # number of epochs to ramp up the MixMatch loss
+        "burn_in_epochs": 0, # number of epochs to wait before ramping MixMatch
+        "dan_criterion": True, # use a domain adversary
+        "dan_ramp_epochs": 20, # ramp epochs for the adversarial loss
+        "dan_max_weight": 0.1, # max weight for the adversarial loss
+        "min_epochs": 20, # minimum epochs to train before saving a best model
+    },
+    "model_kwargs": {
+        "n_hidden": 256, # number of hidden units per hidden layer
+        "n_layers": 2, # number of hidden layers
+        "init_dropout": 0.0, # dropout on the initial layer
+        "residual": False, # use residual layers
+    },
+    # save logs for tensorboard. enables nice visualizations, but can slow down 
+    # training if filesystem I/O is limiting.
+    "tensorboard": False,
+}
 ```
 
 ## CLI
