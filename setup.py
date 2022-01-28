@@ -12,7 +12,7 @@ except ImportError:  # Deps not yet installed
 
 setup(
     name='scnym',
-    version='0.3.1',
+    version='0.3.3',
     description="Semi supervised adversarial network networks for single cell classification",
     long_description="scNym uses the semi-supervised MixMatch framework and domain adversarial training to take advantage of information in both the labeled and unlabeled datasets.",
     url='http://github.com/calico/scnym',
