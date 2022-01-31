@@ -325,6 +325,8 @@ def fit_model(
         domain=d_test,
         num_domains=n_domains,
     )
+    logger.debug(f"{len(train_ds)} training samples in DS.")
+    logger.debug(f"{len(test_ds)} testing samples in DS.")
 
     train_dl = DataLoader(
         train_ds,
@@ -338,6 +340,8 @@ def fit_model(
         batch_size=batch_size,
         shuffle=True,
     )
+    logger.debug(f"{len(train_dl)} training samples in DL.")
+    logger.debug(f"{len(test_dl)} testing samples in DL.")    
 
     dataloaders = {
         "train": train_dl,
