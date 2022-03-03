@@ -107,6 +107,8 @@ class CellTypeCLF(nn.Module):
         n_cell_types: int,
         n_hidden: int = 256,
         n_hidden_init: int = 256,
+        hidden_init_dropout: bool=True,
+        hidden_init_activ: str="relu",
         n_layers: int = 2,
         init_dropout: float = 0.0,
         residual: bool = False,
@@ -129,6 +131,10 @@ class CellTypeCLF(nn.Module):
             number of hidden unit
         n_hidden_init :
             number of hidden units for the initial encoding layer.
+        hidden_init_dropout : bool
+            perform dropout on the first set of activations.
+        hidden_init_activ : str
+            activation for the initial embedding. one of {relu, softmax, sigmoid}.            
         n_layers : int
             number of hidden layers.
         init_dropout : float
@@ -154,6 +160,7 @@ class CellTypeCLF(nn.Module):
         self.n_cell_types = n_cell_types
         self.n_hidden = n_hidden
         self.n_hidden_init = n_hidden_init
+        self.hidden_init_dropout = hidden_init_dropout
         self.n_decoder_layers = n_decoder_layers
         self.n_layers = n_layers
         self.init_dropout = init_dropout
@@ -204,17 +211,34 @@ class CellTypeCLF(nn.Module):
         else:
             hidden_layer = vanilla_layer
 
-        hidden_layers = hidden_layer * (self.n_layers - 1)
+        self.hidden_layers = hidden_layer * (self.n_layers - 1)
 
-        # Build the classifier `nn.Module`.
-        self.embed = nn.Sequential(
+        # build a stack of the very first embedding layer, to be called separately
+        # later if needed
+        # because this is just a list, the parameters won't be registed by this setup
+        # alone
+        self.input_stack = [
             nn.Linear(self.n_genes, self.n_hidden_init),
             nn.BatchNorm1d(
                 num_features=self.n_hidden_init,
                 track_running_stats=self.track_running_stats,
             ),
-            nn.Dropout(),
-            nn.ReLU(inplace=True),
+        ]
+        if self.hidden_init_dropout:
+            self.input_stack.append(nn.Dropout())
+
+        if hidden_init_activ.lower() == "relu":
+            init_activ_mod = nn.ReLU(inplace=True)
+        elif hidden_init_activ.lower() == "softmax":
+            init_activ_mod = nn.Softmax(dim=1)
+        elif hidden_init_activ.lower() == "sigmoid":
+            init_activ_mod = nn.Sigmoid()
+        else:
+            msg = f"{hidden_init_activ} must fit one of the specified initial activations."
+            raise ValueError(msg)
+        self.input_stack.append(init_activ_mod,)
+
+        self.mid_stack = [
             nn.Linear(self.n_hidden_init, self.n_hidden),
             nn.BatchNorm1d(
                 num_features=self.n_hidden,
@@ -222,7 +246,13 @@ class CellTypeCLF(nn.Module):
             ),
             nn.Dropout(),
             nn.ReLU(inplace=True),
-            *hidden_layers,
+        ]
+
+        # Build the embed and classifier `nn.Module`.
+        self.embed = nn.Sequential(
+            *self.input_stack,
+            *self.mid_stack,
+            *self.hidden_layers,
         )
 
         dec_hidden = hidden_layer * (self.n_decoder_layers - 1)
@@ -232,6 +262,10 @@ class CellTypeCLF(nn.Module):
             final_clf,
         )
         return
+
+    def get_initial_embedder(self,):
+        """Convenience function to return the initial embedding layers as `nn.Module`"""
+        return nn.Sequential(*self.input_stack)
 
     def forward(
         self,

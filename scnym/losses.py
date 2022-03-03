@@ -6,6 +6,7 @@ import logging
 from typing import Callable, Union, Iterable, Tuple
 from .dataprep import SampleMixUp
 from .model import CellTypeCLF, DANN, AE
+from . import attributionpriors as attrprior
 from .distributions import NegativeBinomial
 import copy
 
@@ -1037,7 +1038,7 @@ class DANLoss(nn.Module):
         model: CellTypeCLF,
         use_conf_pseudolabels: bool = False,
         scale_loss_pseudoconf: bool = False,
-        n_domains: int = 2,
+        n_domains: Union[int, tuple] = 2,
         **kwargs,
     ) -> None:
         """Compute a domain adaptation network loss.
@@ -1055,8 +1056,11 @@ class DANLoss(nn.Module):
         scale_loss_pseudoconf : bool
             scale the weight of the gradients passed to both models based
             on the proportion of confident pseudolabels.
-        n_domains : int
+        n_domains : int, Tuple[int]
             number of domains of origin to predict using the adversary.
+            each int in a tuple is considered a unique domain label for 
+            multi-adversarial training. unique domain labels must be supplied
+            in the order as provided to `SingleCellDS`.
 
         Returns
         -------
@@ -1074,16 +1078,21 @@ class DANLoss(nn.Module):
         super(DANLoss, self).__init__()
 
         self.dan_criterion = dan_criterion
-
-        # build the DANN
-        self.dann = DANN(
-            model=model,
-            n_domains=n_domains,
-            **kwargs,
-        )
-        self.dann.domain_clf = self.dann.domain_clf.to(
-            device=next(iter(model.parameters())).device,
-        )
+        self.n_domains = (n_domains,) if type(n_domains)==int else n_domains
+        self.n_dans = 1 if type(n_domains)==int else len(n_domains)
+        # build the DANN (build multiple if needed)
+        dann = []
+        for nd in self.n_domains:
+            adv = DANN(
+                model=model,
+                n_domains=nd,
+                **kwargs,
+            )
+            adv.domain_clf = adv.domain_clf.to(
+                device=next(iter(model.parameters())).device,
+            )
+            dann.append(adv)
+        self.dann = nn.ModuleList(dann)
         # instantiate with small tensor to simplify downstream size
         # checking logic
         self.x_embed = torch.zeros((1, 1))
@@ -1144,6 +1153,11 @@ class DANLoss(nn.Module):
         if unlabeled_sample is None:
             t = torch.FloatTensor().to(device=labeled_sample["input"].device)
             unlabeled_sample = {k: t for k in ["input", "domain"]}
+        # we also ignore the unlabeled data if it doesn't have a domain label
+        # associated with it. null domain labels are `-1`, so this checks absence/null.
+        if torch.sum(unlabeled_sample.get("domain", torch.tensor([-1,])) < 0 ) > 0:
+            t = torch.FloatTensor().to(device=labeled_sample["input"].device)
+            unlabeled_sample = {k: t for k in ["input", "domain"]}       
 
         ########################################
         # (1) Create domain labels
@@ -1162,6 +1176,9 @@ class DANLoss(nn.Module):
             logger.debug("DAN source domain labels inferred.")
         else:
             # domain labels should already by one-hot
+            # if multiple domains are present, one-hot labels are concatenated
+            # along the dim=1 dimension, so we will need to split them using info
+            # in `self.n_domains` later
             source_label = labeled_sample["domain"]
         source_label = source_label.to(device=labeled_sample["input"].device)
 
@@ -1200,35 +1217,48 @@ class DANLoss(nn.Module):
         x = torch.cat([lx, ux], 0)
         dlabel = torch.cat([source_label, target_label], 0)
 
-        self.dann.set_rev_grad_weight(weight=weight)
-        domain_pred, x_embed = self.dann(x)
+        # predict each domain variable with a separate adversary
+        dan_loss = torch.zeros(1,).to(device=lx.device)
+        for i, adv in enumerate(self.dann):
+            adv.set_rev_grad_weight(weight=weight)
+            domain_pred, x_embed = adv(x)
 
-        # store embeddings and labels
-        if x_embed.size(0) >= self.x_embed.size(0):
-            self.x_embed = copy.copy(x_embed.detach().cpu())
-            self.dlabel = copy.copy(dlabel.detach().cpu())
+            # store embeddings and labels only fir the first adversary
+            if (x_embed.size(0) >= self.x_embed.size(0)) and (i==0):
+                self.x_embed = copy.copy(x_embed.detach().cpu())
+                self.dlabel = copy.copy(dlabel.detach().cpu())
 
-        ########################################
-        # (4) Compute DAN loss
-        ########################################
+            ########################################
+            # (4) Compute DAN loss
+            ########################################
 
-        dan_loss = self.dan_criterion(
-            domain_pred,
-            dlabel,
-        )
+            # we need to extract the labels for *this* domain from the concatenated
+            # one-hot label matrices
+            idx_start = sum(self.n_domains[:i])
+            idx_end = idx_start + self.n_domains[i]
+            curr_dlabel = dlabel[:, idx_start:idx_end]
 
-        ########################################
-        # (5) Compute DAN accuracy for logs
-        ########################################
-
-        _, dan_pred = torch.max(domain_pred, dim=1)
-        _, dlabel_int = torch.max(dlabel, dim=1)
-        self.dan_acc = (
-            torch.sum(
-                dan_pred == dlabel_int,
+            adv_loss = self.dan_criterion(
+                domain_pred,
+                curr_dlabel,
             )
-            / float(dan_pred.size(0))
-        )
+            dan_loss += adv_loss
+
+            ########################################
+            # (5) Compute DAN accuracy for logs
+            ########################################
+
+            # only record accuracy for first domain label
+            if i != 0:
+                continue
+            _, dan_pred = torch.max(domain_pred, dim=1)
+            _, dlabel_int = torch.max(dlabel, dim=1)
+            self.dan_acc = (
+                torch.sum(
+                    dan_pred == dlabel_int,
+                )
+                / float(dan_pred.size(0))
+            )
 
         if self.scale_loss_pseudoconf:
             dan_loss *= p_conf_pseudolabels
@@ -1689,6 +1719,34 @@ class ICLWeight(object):
 """Structured latent variable learning"""
 
 
+def set_prior_matrix_from_gene_sets(
+    weight_class,
+) -> None:
+    """Generate a prior matrix from a set of gene programs
+    and gene names for the input variables.
+    """
+    weight_class.gene_set_names = sorted(list(weight_class.gene_sets.keys()))
+
+    # [n_programs, n_genes]
+    P = torch.zeros(
+        (
+            weight_class.n_hidden,
+            weight_class.n_genes,
+        )
+    ).bool()
+
+    gene_names = weight_class.gene_names
+    for i, k in enumerate(weight_class.gene_set_names):
+        genes = weight_class.gene_sets[k]
+        bidx = torch.tensor(
+            [x in genes for x in gene_names],
+            dtype=torch.bool,
+        )
+        P[i, :] = bidx
+
+    return P
+
+
 class StructuredSparsity(object):
     def __init__(
         self,
@@ -1738,7 +1796,7 @@ class StructuredSparsity(object):
         self.n_genes = n_genes
         self.n_hidden = n_hidden
         self.gene_sets = gene_sets
-        self.gene_names = gene_names
+        self.gene_names = gene_names.tolist() if type(gene_names)!= list else gene_names
         self.prior_matrix = None
         self.n_dense_latent = n_dense_latent
         self.group_lasso = group_lasso
@@ -1765,13 +1823,113 @@ class StructuredSparsity(object):
 
             # set `self.prior_matrix` based on the gene sets
             # also sets `self.gene_set_names`
-            self._set_prior_matrix_from_gene_sets()
+            self.prior_matrix = set_prior_matrix_from_gene_sets(weight_class=self)
 
         if prior_matrix is not None:
             # if the prior_matrix was provided, always prefer it.
             self.prior_matrix = prior_matrix
 
         assert self.prior_matrix is not None
+        return
+
+    def _set_prior_matrix_from_gene_sets(
+        self,
+    ) -> None:
+        """Generate a prior matrix from a set of gene programs
+        and gene names for the input variables.
+        """
+        self.gene_set_names = sorted(list(self.gene_sets.keys()))
+
+        # [n_programs, n_genes]
+        P = torch.zeros(
+            (
+                self.n_hidden,
+                self.n_genes,
+            )
+        ).bool()
+
+        # cast to set for list comprehension speed
+        gene_names = set(self.gene_names)
+        for i, k in enumerate(self.gene_set_names):
+            genes = self.gene_sets[k]
+
+            bidx = torch.tensor(
+                [x in genes for x in gene_names],
+                dtype=torch.bool,
+            )
+            P[i, :] = bidx
+
+        self.prior_matrix = P
+        return
+
+    @torch.no_grad()
+    def init_model_params(self, model: nn.Module, scale: float=0.01):
+        """Scale parameters of the input layer to initialize close to a sparse regime"""
+        W = dict(model.named_parameters())["embed.0.weight"]
+        P = torch.logical_not(self.prior_matrix.to(device=W.data.device))
+        prior_flat = P.view(-1)
+        W_flat = W.view(-1)
+        W_flat[prior_flat] *= scale
+        return
+
+    def __call__(
+        self,
+        model: nn.Module,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        """Compute the l1 sparsity loss."""
+        # get first layer weights
+        W = dict(model.named_parameters())["embed.0.weight"]
+        logger.debug(f"Weights {W}, sum: {W.sum()}")
+        # generate a "penalty" matrix `P` that we'll modify
+        # before computing the l1
+        # this elem-mult zeros out the loss on any annotated
+        # genes in each gene program
+        P = W * torch.logical_not(self.prior_matrix).float().to(device=W.device)
+        logger.debug(f"Penalty {P}, sum {P.sum()}")
+        # omit the dense latent factors (if any) from the l1
+        # computation
+        n_latent = P.size(0) - self.n_dense_latent
+        prior_norm = torch.norm(P[:n_latent], p=self.p_norm)
+        logger.debug(f"l1 {prior_norm}")
+
+        if self.nonnegative:
+            # place an optional non-negativity penalty on genes within the gene set
+            # nonneg_inset = W * self.prior_matrix.float().to(device=W.device)
+            # nonneg_norm = torch.norm(nonneg_inset[nonneg_inset < 0], p=self.p_norm)
+            W_flat = W.view(-1)
+            bidx = (W_flat < 0.0).bool()
+            W_flat[bidx] = 0.0
+        else:
+            nonneg_norm = 0.0
+
+        r = prior_norm + nonneg_norm
+        return r
+
+    def train(self, *args, **kwargs) -> None:
+        """Dummy function to match `nn.Module` methods"""
+        return
+
+    def eval(self, *args, **kwargs) -> None:
+        """Dummy function to match `nn.Module` methods"""
+        return
+
+
+class WithinGeneSetNorm(object):
+
+    def __init__(
+        self,
+        gene_sets: dict = None,
+        gene_names: Iterable = None,
+    ) -> None:
+        """Penalize a norm for latent variable weights that are *within* a prior
+        gene set specification"""
+        self.n_genes = len(gene_names)
+        self.n_hidden = len(gene_sets)
+        self.gene_sets = gene_sets
+        self.gene_names = gene_names
+
+        self._set_prior_matrix_from_gene_sets()
         return
 
     def _set_prior_matrix_from_gene_sets(
@@ -1803,36 +1961,519 @@ class StructuredSparsity(object):
         self.prior_matrix = P
         return
 
+    def __call__(self, model, *args, **kwargs) -> torch.FloatTensor:
+        """Compute an L2 penalty only on the latent variable embedding weights"""
+        W = dict(model.named_parameters())["embed.0.weight"]
+        # zero out weights outside the gene set itself
+        P = W * self.prior_matrix.float().to(device=W.device)
+        norm = torch.norm(P, p=2)
+        return norm
+
+    def train(self, *args, **kwargs) -> None:
+        """Dummy function to match `nn.Module` methods"""
+        return
+
+    def eval(self, *args, **kwargs) -> None:
+        """Dummy function to match `nn.Module` methods"""
+        return        
+
+
+class WeightMask(object):
+
+
+    def __init__(
+        self,
+        model: nn.Module,
+        gene_sets: dict,
+        gene_names: Iterable,
+        prior_matrix: np.ndarray=None,
+        mask_value: float=0.0,
+        nonnegative: bool=True,
+    ) -> None:
+        """Apply a simple mask to the weights of a model.
+
+        Parameters
+        ----------
+        n_genes : int
+            number of genes in the input layer.
+        n_hidden : int
+            number of hidden units in the input layer.
+        gene_sets : dict, optional.
+            keys are program names, values are lists of gene names.
+            must have fewer keys than `n_hidden`.
+        gene_names : Iterable, optional.
+            names for genes in `n_genes`. required for use of `gene_sets`.
+        prior_matrix : np.ndarray, torch.FloatTensor
+            [n_hidden, n_genes] binary matrix of prior constraints.
+            if provided with `gene_sets`, this matrix is used instead.
+        nonnegative : bool
+            force weight values to be non-negative by ReLU-ing the weight matrix.
+
+        Returns
+        -------
+        None.
+        """
+        self.model = model
+        self.n_genes = self.model.n_genes
+        self.n_hidden = self.model.n_hidden_init
+        self.gene_sets = gene_sets
+        self.gene_names = gene_names
+        self.prior_matrix = prior_matrix
+        self.mask_value = mask_value
+        self.nonnegative = nonnegative
+
+        if prior_matrix is None and gene_sets is None:
+            msg = "Must provide either a prior_matrix or gene_sets to use."
+            raise ValueError(msg)
+
+        if gene_sets is not None and gene_names is None:
+            msg = "Must provide `gene_names` to use `gene_sets`."
+            raise ValueError(msg)
+
+        assert len(gene_names) == self.model.n_genes
+
+        if gene_sets is not None and gene_names is not None:
+
+            if len(gene_sets.keys()) > self.n_hidden:
+                # check that we didn't provide too many gene sets
+                # given the size of our encoder
+                msg = f"{len(gene_sets.keys())} gene sets provided,\n"
+                msg += f"but there are only {self.n_hidden} hidden units.\n"
+                msg += "Must specify fewer programs than hidden units."
+                raise ValueError(msg)
+
+            # set `self.prior_matrix` based on the gene sets
+            # also sets `self.gene_set_names`
+            self.prior_matrix = set_prior_matrix_from_gene_sets(weight_class=self)
+
+        if prior_matrix is not None:
+            # if the prior_matrix was provided, always prefer it.
+            self.prior_matrix = prior_matrix
+
+        assert self.prior_matrix is not None
+        ident_op = lambda x: x
+        # inverse relu for grad descent, we step in the opposite direction of grads
+        inv_lu = lambda x: torch.clamp_max(x, 0.) 
+        self.grad_op = (
+            inv_lu if self.nonnegative else ident_op
+        )
+        # get the weights matrix 
+        W = dict(model.named_parameters())["embed.0.weight"]
+        # set the weights matrix values to zero outside the prior matrix, 
+        # pos values elsewhere
+        P = torch.logical_not(self.prior_matrix)
+        with torch.no_grad():
+            # we can only manually change values when grad is off
+            # https://discuss.pytorch.org/t/how-to-manually-set-the-weights-in-a-two-layer-linear-model/45902/2
+            W[P] = 0.0
+            W[W < 0.] *= -1
+            # register the backward hook
+        W.register_hook(self.mask_grad)
+        device = W.device
+
+        self.prior_matrix = self.prior_matrix.to(device=device)
+
+        return
+
+    def mask_grad(
+        self,
+        grad,
+    ) -> None:
+        """Mask gradients to follow the sparsity matrix."""
+        P = self.prior_matrix.to(device=grad.device)
+        new_grad = grad * P
+        return new_grad
+
+    @torch.no_grad()
     def __call__(
         self,
         model: nn.Module,
         **kwargs,
-    ) -> torch.FloatTensor:
-        """Compute the l1 sparsity loss."""
-        # get first layer weights
+    ) -> float:
+        """Adjust weights to fit gene set priors as needed.
+        
+        Returns
+        -------
+        zero : float
+            placeholder for a loss term so we can use this in `MultiTaskTrainer`.
+        """
+        EPS=1e-9
         W = dict(model.named_parameters())["embed.0.weight"]
-        logger.debug(f"Weights {W}, sum: {W.sum()}")
-        # generate a "penalty" matrix `P` that we'll modify
-        # before computing the l1
-        # this elem-mult zeros out the loss on any annotated
-        # genes in each gene program
-        P = W * torch.logical_not(self.prior_matrix).float().to(device=W.device)
-        logger.debug(f"Penalty {P}, sum {P.sum()}")
-        # omit the dense latent factors (if any) from the l1
-        # computation
-        n_latent = P.size(0) - self.n_dense_latent
-        prior_norm = torch.norm(P[:n_latent], p=self.p_norm)
-        logger.debug(f"l1 {prior_norm}")
-
-        #         W1 = dict(model.named_parameters())['embed.4.weight']
-        #         group_l1 = torch.norm(W1, p=1)
-
         if self.nonnegative:
-            # place an optional non-negativity penalty on genes within the gene set
-            nonneg_inset = W * self.prior_matrix.float().to(device=W.device)
-            nonneg_norm = torch.norm(nonneg_inset[nonneg_inset < 0], p=self.p_norm)
-        else:
-            nonneg_norm = 0.0
+            # get zero indices within the prior matrix, fill with rand vals near eps
+            P = self.prior_matrix.to(device=W.data.device)
+            prior_flat = P.view(-1)
+            W_flat = W.view(-1)
+            W_neg_bidx = (W_flat < 0.0).bool()
+            bidx2flip = prior_flat & W_neg_bidx
+            W_flat[bidx2flip] = torch.rand(
+                size=(bidx2flip.sum().item(),)
+            ).to(device=W.data.device)*EPS
+        return torch.zeros(size=(1,)).to(W.data.device)
+    
+    def train(self, *args, **kwargs) -> None:
+        """Dummy function to match `nn.Module` methods"""
+        return
 
-        r = prior_norm + nonneg_norm
-        return r
+    def eval(self, *args, **kwargs) -> None:
+        """Dummy function to match `nn.Module` methods"""
+        return
+
+
+class LatentGeneCorrGuide(nn.Module):
+
+    def __init__(
+        self,
+        gene_names: Iterable,
+        latent_var_genes: Iterable,
+        criterion: str="pearson",
+        noise_p: float=0.3,
+        lv_dropout: bool=True,
+        mean_corr_weight: float=0.0,
+        **kwargs,
+    ) -> None:
+        """Encourage a correlation between a set of latent variables and a set of
+        specific input features.
+        
+        Parameters
+        ----------
+        gene_names : Iterable
+            list of gene names for input features.
+        latent_var_genes : Iterable
+            [n_hidden_init,] length iterable of gene names to match to each latent
+            var. if element is `None`, does not encourage correlation for that latent
+            variable.
+        noise_p : float
+            [0, 1] fraction of input genes to mask before extracting the latent 
+            embedding.
+        lv_dropout : bool
+            perform dropout on latent variables. it can be useful to deactivate lv
+            dropout during lv-guide pre-training.
+        mean_corr_weight : float
+            peanlize the correlation of activation means and mRNA means, weighted by
+            `mean_corr_weight`. if `0.0` does not penalize.
+            this may be useful to prevent LVs without expressed genes as a guide from
+            taking on arbitrarily high values.
+        
+        Returns
+        -------
+        None.
+
+        Notes
+        -----
+        For now, treat each latent var as a binary classifier for the positive cells
+        and use BCE loss to optimize.
+        """
+        super(LatentGeneCorrGuide, self).__init__()
+        self.gene_names = (
+            gene_names.tolist() 
+            if type(gene_names)==np.ndarray else gene_names
+        )
+        self.noise_p = noise_p
+        self.mean_corr_weight = mean_corr_weight
+        # NOTE: Assumes that latent variable to gene set assignments are lexographically
+        # sorted, per `set_prior_matrix_from_gene_sets`
+        self.latent_var_genes = sorted(
+            latent_var_genes.tolist()
+            if type(latent_var_genes)==np.ndarray else latent_var_genes
+        )
+        self.bce = nn.BCELoss()
+        if criterion == "bce":
+            self.criterion = self.get_bce_loss
+        elif criterion == "pearson":
+            self.criterion = self.get_pearson_loss
+        else:
+            raise ValueError(f"criterion must be in [bce, pearson], not {criterion}.")
+        self.lv_dropout = lv_dropout
+
+        # find the feature indices for each latent variable
+        self.mask_idx = -1
+        self.latent_gene_idx = np.array(
+            [
+                self.gene_names.index(x) 
+                if x in self.gene_names else self.mask_idx for x in self.latent_var_genes
+            ],
+            dtype=np.int32,
+        )
+        n_missing = np.sum(self.latent_gene_idx==self.mask_idx)
+        if n_missing > 0:
+            logger.warn(f"{n_missing} latent variables have no matching mRNA. "
+            "Masking from loss computations.")
+        self.latents_idx2keep = np.where(self.latent_gene_idx!=self.mask_idx)[0]
+        self.genes_idx2keep = self.latent_gene_idx[self.latents_idx2keep]
+        return
+
+    def get_bce_loss(self, z, target) -> torch.FloatTensor:
+        """Compute the mean BCE loss for each feature:LV pair"""
+        # standardize z and target [0, 1]
+        z_s = z - z.min(0)[0].view(1, -1)
+        z_s = z_s / z_s.max(0)[0].view(1, -1)
+        # target_s = target - target.min(0)[0].view(1, -1)
+        # target_s = target_s / target_s.max(0)[0].view(1, -1)
+        target_s = (target > 0.).float()
+        z_s[torch.isnan(z_s)] = 0.
+        target_s[torch.isnan(target_s)] = 0.
+        loss = self.bce(z_s, target_s)
+        return loss
+
+    def get_pearson_loss(self, z, target) -> torch.FloatTensor:
+        """Compute the pearson loss for each feature:LV pair and return the mean.
+
+        Notes
+        -----
+        .. math::
+            r = E[(x - \bar x) (y - \bar y)] / (\sigma_x \sigma_y)
+
+        References
+        ----------
+        We use this trick to get the diagonal of a large matmul in the numerator
+        https://bit.ly/3euhsJN
+        """
+        z_s = z - z.mean(0)
+        target_s = target - target.mean(0)
+        # [lv, batch] @ [batch, lv] numerator E[(x-\barx)(y-\bary)] -> [lv, lv]
+        # torch.diag(m1 @ m2) == torch.sum(m1 * m2.T).sum(dim=1)
+        num = (target_s.T * z_s.T).sum(dim=1) / z_s.size(0) # [lv,]
+        denom = z_s.std(0).view(-1) * target_s.std(0).view(-1)
+        denom[torch.isnan(denom)] = torch.min(denom[~torch.isnan(denom)])
+        denom = torch.clamp_min(denom, torch.min(denom[denom>0]))
+        return -torch.mean(num / denom)
+
+    def __call__(
+        self,
+        model: nn.Module,
+        labeled_sample: dict,
+        unlabeled_sample: dict=None,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        """
+        Parameters
+        ----------
+        model : nn.Module
+            model for training.
+        labeled_sample, unlabeled_sample : dict
+            keys {input, output, domain, embed} with torch.Tensor values.
+        
+        Returns
+        -------
+        loss : torch.FloatTensor
+        """
+        # join labeled and unlabeled samples into a single tensor
+        x0 = labeled_sample["input"]
+        emptyT = torch.FloatTensor([]).to(device=x0.device) # no-op in `.cat`
+        x1 = unlabeled_sample["input"] if unlabeled_sample is not None else emptyT
+        # get LV activations for all datapoints
+        if labeled_sample.get("lv", False):
+            z0 = labeled_sample["lv"]
+            z1 = unlabeled_sample["lv"] if unlabeled_sample is not None else emptyT
+        else:
+            # `list` of modules to form the lv embedder
+            # [Lin, BN, DO (optional), ReLU]
+            mods = model.input_stack
+            if not self.lv_dropout and len(mods) > 3:
+                # if lv_dropout is False AND dropout in the mods, cut it out
+                mods = [x for i, x in enumerate(mods) if i!=3]
+            if len(mods)!=3 and len(mods)!=4:
+                # this is unexpected, throw an error
+                msg = f"num modules in lv embedder is {len(mods)}, should be 3 or 4"
+                raise ValueError(msg)
+
+            # make embedder
+            lv_embedder = nn.Sequential(
+                nn.Dropout(p=self.noise_p),
+                *mods
+            )
+            # embed to latent variables
+            z0 = lv_embedder(x0)
+            z1 = lv_embedder(x1) if unlabeled_sample is not None else emptyT
+
+        x = torch.cat([x0, x1], dim=0)
+        z = torch.cat([z0, z1], dim=0)
+        # get the matrix of target expression for each latent var [Batch, LVs]
+        target = x[:, self.genes_idx2keep]
+        # remove any masked latent vars that don't have a corresponding mRNA
+        z = z[:, self.latents_idx2keep]
+        # compute the loss for z and targets
+        loss = self.criterion(z, target)
+
+        # compute the corr loss across means of latent and target values
+        if self.mean_corr_weight > 0:
+            mean_corr = self.criterion(
+                torch.mean(z, dim=0).reshape(-1, 1),
+                torch.mean(target, dim=0).reshape(-1, 1),
+            )
+            loss += (self.mean_corr_weight * mean_corr)
+
+        return loss
+
+
+"""Attribution priors"""
+
+
+class AttrPrior(nn.Module):
+    def __init__(
+        self,
+        reference_dataset: torch.utils.data.Dataset,
+        batch_size: int,
+        attr_prior: str="gini",
+        grad_activation: str="first_layer",
+    ) -> None:
+        """Implement an attribution prior by penalizing expected gradient estimation
+        of Shapley values during training.
+        
+        Parameters
+        ----------
+        reference_dataset : torch.utils.data.Dataset
+            dataset to use for sampling expected gradient references.
+        batch_size : int
+            batch size to use for expected gradient reference sampling. 
+            must match training batch size.
+        attr_prior : str
+            attribution prior type, one of {'gini', 'gini_classwise', }
+        grad_activation : str
+            activations to use for gradient computation.
+            one of {"input", "first_layer"}.
+
+        Returns
+        -------
+        None.
+        """
+        super(AttrPrior, self).__init__()
+        self.ref_ds = reference_dataset
+        self.batch_size = batch_size
+
+        self.attr_prior = attr_prior
+        self.grad_activation = grad_activation
+
+        if attr_prior == "gini":
+
+            def attr_criterion(model, labeled_sample, unlabeled_sample, weight):
+                input_ = labeled_sample["input"]
+                target = labeled_sample["output_int"]
+                exp_grad = self._get_exp_grad(model, input_, target)
+                # l_ap = attrprior.gini_eg(exp_grad)
+                l_ap = attrprior.gini_eg(
+                    exp_grad,
+                )
+                return l_ap
+
+        elif attr_prior == "gini_classwise":
+            
+            def attr_criterion(model, labeled_sample, unlabeled_sample, weight):
+                input_ = labeled_sample["input"]
+                target = labeled_sample["output_int"]
+                exp_grad = self._get_exp_grad(model, input_, target)
+                # l_ap = attrprior.gini_eg(exp_grad)
+                l_ap = attrprior.gini_classwise_eg(exp_grad, target)
+                return l_ap
+
+        elif attr_prior == "gini_cellwise":
+
+            def attr_criterion(model, labeled_sample, unlabeled_sample, weight):
+                input_ = labeled_sample["input"]
+                target = labeled_sample["output_int"]
+                exp_grad = self._get_exp_grad(model, input_, target)
+                l_ap = attrprior.gini_cellwise_eg(exp_grad,)
+                return l_ap
+
+        else:
+            msg = f"{attr_prior} is not a valid attribution prior type."
+            raise ValueError(msg)
+
+        self.attr_criterion = attr_criterion
+
+        self.APExp = attrprior.AttributionPriorExplainer(
+            self.ref_ds,
+            batch_size=self.batch_size,
+            k=1,
+            input_batch_index="input",
+        )
+
+        self._get_exp_grad = {
+            "first_layer": self._first_layer_exp_grad,
+            "input": self._input_exp_grad,
+        }[self.grad_activation]
+        return
+
+    def _input_exp_grad(
+        self,
+        model,
+        input_: torch.FloatTensor,
+        target: torch.LongTensor,
+    ) -> torch.FloatTensor:
+        """Get expected gradients from the input layer"""
+        exp_grad = self.APExp.shap_values(
+            model,
+            input_,
+            sparse_labels=target,
+        )
+        return exp_grad
+
+    def _first_layer_exp_grad(
+        self,
+        model,
+        input_: torch.FloatTensor,
+        target: torch.LongTensor,
+    ) -> torch.FloatTensor:
+        """Get expected gradients for the first layer activations"""
+        embedder_model = copy.deepcopy(model.get_initial_embedder())
+        embedder_model.train(False)
+
+        score_model = nn.Sequential(
+            *model.mid_stack,
+            *model.hidden_layers,
+            model.classif,
+        )
+        # display the score and embedder models for debugging
+        m_desc = list(embedder_model.modules())[0]
+        logger.debug(f"embedder_model extracted\n{m_desc}")
+        m_desc = list(score_model.modules())[0]
+        logger.debug(f"score_model extracted\n{m_desc}")
+
+        # debugger model visualization
+        emdl = list(embedder_model.modules())[0]
+        smdl = list(score_model.modules())[0]
+        logger.debug(f"embedder_model: {emdl}")
+        logger.debug(f"score_model: {smdl}")
+
+        def batch_transformation(x):
+            y = embedder_model(x)
+            return y.detach()
+
+        # embed the input
+        embedded_input_ = batch_transformation(
+            input_,
+        )
+        logger.debug(f"input_ size: {input_.size()}")
+        logger.debug(f"embedded_input_ size: {embedded_input_.size()}")
+
+        exp_grad = self.APExp.shap_values(
+            model=score_model,
+            input_tensor=embedded_input_,
+            sparse_labels=target,
+            batch_transformation=batch_transformation,
+        )
+        return exp_grad
+
+    def __call__(
+        self, 
+        model: nn.Module, 
+        labeled_sample: dict, 
+        unlabeled_sample: dict=None, 
+        weight: float=1.0, 
+        **kwargs
+    ) -> torch.FloatTensor:
+        """Compute attribution prior on a batch of data"""
+        if labeled_sample["output"].dim() > 1:
+            # cast targets to integers for attribution prior calculation
+            _, target_int = torch.max(labeled_sample["output"], dim=-1)
+            labeled_sample["output_int"] = target_int
+
+        c = self.attr_criterion(
+            model=model,
+            labeled_sample=labeled_sample,
+            unlabeled_sample=unlabeled_sample,
+            weight=weight,
+        )
+        logger.debug(f"AttrPrior criterion: {c}")
+        return c

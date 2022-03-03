@@ -36,7 +36,48 @@ def test_model_build():
         init_dropout=0.0,
         track_running_stats=False,
     )
+    # test getting the initial embedding
+    model = scnym.model.CellTypeCLF(
+        n_genes=1000,
+        n_hidden_init=128,
+        hidden_init_dropout=True,
+        n_cell_types=10,
+        n_hidden=64,
+        n_layers=2,
+        residual=False,
+        init_dropout=0.0,
+        track_running_stats=False,
+    )
+    # should be [Lin, BN, DO, ReLU]
+    assert len(model.input_stack) == 4
+    
+    model = scnym.model.CellTypeCLF(
+        n_genes=1000,
+        n_hidden_init=128,
+        hidden_init_dropout=False,
+        n_cell_types=10,
+        n_hidden=64,
+        n_layers=2,
+        residual=False,
+        init_dropout=0.0,
+        track_running_stats=False,
+    )
+    assert len(model.input_stack) == 3    
 
+    # test changing the activation
+    model = scnym.model.CellTypeCLF(
+        n_genes=1000,
+        n_hidden_init=128,
+        hidden_init_dropout=True,
+        hidden_init_activ="softmax",
+        n_cell_types=10,
+        n_hidden=64,
+        n_layers=2,
+        residual=False,
+        init_dropout=0.0,
+        track_running_stats=False,
+    )
+    assert isinstance(model.input_stack[-1], torch.nn.Softmax)
     return
 
 
