@@ -28,23 +28,20 @@ from .losses import scNymCrossEntropy
 from .predict import Predicter
 from . import utils
 
+logger = logging.getLogger(__name__)
+
 # allow tensorboard outputs even though TF2 is installed
 # TF2 broke the tensorboard/pytorch API, so we need to alias
 # the old API endpoint below
 try:
     import tensorflow as tf
     tfv = int(tf.__version__.split(".")[0])
-except ImportError:
-    print("tensorflow is not installed, assuming tensorboard is independent")
-    tfv = 1
+    if tfv > 1:
+        import tensorboard as tb
 
-if tfv > 1:
-    import tensorboard as tb
-
-    tf.io.gfile = tb.compat.tensorflow_stub.io.gfile
-
-
-logger = logging.getLogger(__name__)
+        tf.io.gfile = tb.compat.tensorflow_stub.io.gfile    
+except:
+    logger.warn("Tensorflow not installed, using tensorboard alone")
 
 # define optimizer map for cli selection
 OPTIMIZERS = {
@@ -120,7 +117,7 @@ def fit_model(
         log1p and normalization performed using scanpy defaults.
     y : np.ndarray
         [Cells,] integer class labels.
-    traintest_idx : np.ndarray
+    traintest_idx : np.ndarray, tuple
         [Int,] indices to use for training and early stopping.
         a single array will be randomly partitioned, OR a tuple
         of `(train_idx, test_idx)` can be passed.
@@ -193,6 +190,7 @@ def fit_model(
 
     if type(traintest_idx) != tuple:
         # Set aside 10% of the traintest data for model selection in `test_idx`
+        print("Performing train/test data split.")
         train_idx = np.random.choice(
             traintest_idx,
             size=int(np.floor(0.9 * len(traintest_idx))),
@@ -200,6 +198,7 @@ def fit_model(
         ).astype("int")
         test_idx = np.setdiff1d(traintest_idx, train_idx).astype("int")
     elif type(traintest_idx) == tuple and len(traintest_idx) == 2:
+        print("Using prespecific train/test split.")
         # use the user provided train/test split
         train_idx = traintest_idx[0]
         test_idx = traintest_idx[1]
@@ -207,6 +206,13 @@ def fit_model(
         # the user supplied an invalid argument
         msg = "`traintest_idx` of type {type(traintest_idx)}\n"
         msg += "and length {len(traintest_idx)} is invalid."
+        raise ValueError(msg)
+
+    # check that we have at least one batch of training data
+    if len(train_idx) < batch_size:
+        msg = f"only {len(train_idx)} training samples found.\n"
+        msg += f"{train_idx}\n{traintest_idx}\n"
+        msg += "must be `>=batch_size`. add more data or lower `batch_size`."
         raise ValueError(msg)
 
     # save indices to CSVs for later retrieval
@@ -268,6 +274,14 @@ def fit_model(
     y_test = y[test_idx]
 
     # count the number of domains
+    # first check if domains were passed in as raw np.ndarray, wrap in list if so
+    input_domain = (
+        [input_domain] if type(input_domain)==np.ndarray else input_domain
+    )
+    unlabeled_domain = (
+        [unlabeled_domain] if type(unlabeled_domain)==np.ndarray else unlabeled_domain
+    )
+
     if (
         (input_domain is None)
         and (unlabeled_domain is None)
@@ -281,32 +295,33 @@ def fit_model(
     ):
         n_domains = 1
     elif (input_domain is not None) and (unlabeled_domain is None):
-        input_domain_max = input_domain.max()
-        n_domains = int(input_domain_max)
+        n_domains = []
+        for _id in input_domain:
+            input_domain_max = _id.max()
+            n_domains.append(int(input_domain_max + 1))
     elif (input_domain is not None) and (unlabeled_domain is not None):
-        input_domain_max = input_domain.max()
-        unlabeled_domain_max = (
-            0 if len(unlabeled_domain) == 0 else unlabeled_domain.max()
-        )
-        n_domains = (
-            int(
-                np.max(
-                    [
-                        input_domain_max,
-                        unlabeled_domain_max,
-                    ]
-                )
+        n_domains = []
+        for i in range(len(input_domain)):
+            input_domain_max = input_domain[i].max()
+            unlabeled_domain_max = (
+                unlabeled_domain[i].max() 
+                if type(unlabeled_domain[i])==np.ndarray
+                else -1
             )
-            + 1
-        )
+            if unlabeled_domain_max == -1:
+                msg = f"unlabeled_domain_max==-1, {unlabeled_domain}"
+                raise ValueError(msg)
+            max_domain = int(max([input_domain_max, unlabeled_domain_max]))
+            n_domains.append( max_domain + 1 )
+            assert input_domain[i].max() < n_domains[i]
     else:
         msg = "domains supplied for only one set of data"
         raise ValueError(msg)
     print(f"Found {n_domains} unique domains.")
 
     if input_domain is not None:
-        d_train = input_domain[train_idx]
-        d_test = input_domain[test_idx]
+        d_train = [_id[train_idx] for _id in input_domain]
+        d_test = [_id[test_idx] for _id in input_domain]
     else:
         d_train = None
         d_test = None
@@ -325,8 +340,6 @@ def fit_model(
         domain=d_test,
         num_domains=n_domains,
     )
-    logger.debug(f"{len(train_ds)} training samples in DS.")
-    logger.debug(f"{len(test_ds)} testing samples in DS.")
 
     train_dl = DataLoader(
         train_ds,
@@ -340,8 +353,6 @@ def fit_model(
         batch_size=batch_size,
         shuffle=True,
     )
-    logger.debug(f"{len(train_dl)} training samples in DL.")
-    logger.debug(f"{len(test_dl)} testing samples in DL.")    
 
     dataloaders = {
         "train": train_dl,
@@ -433,7 +444,7 @@ def fit_model(
         # perform fully supervised training
         print("Performing fully supervised training with no domain adaptation.")
         T = Trainer(**trainer_kwargs)
-    elif unlabeled_counts is None and (n_domains > 1):
+    elif unlabeled_counts is None and (n_domains != 1):
         print("Performing supervised training with a domain adversary.")
         # perform supervised training with DA
         # use the MultiTaskTrainer
@@ -461,12 +472,13 @@ def fit_model(
                 sigmoid=ssl_kwargs.get("sigmoid", True),
             )
             # add DANN parameters to the optimizer
-            optimizer.add_param_group(
-                {
-                    "params": dan_criterion.dann.domain_clf.parameters(),
-                    "name": "domain_classifier",
-                }
-            )
+            for i, adv in enumerate(dan_criterion.dann):
+                optimizer.add_param_group(
+                    {
+                        "params": adv.domain_clf.parameters(),
+                        "name": "domain_classifier_{i}",
+                    }
+                )
         ce = scNymCrossEntropy()
         criteria = [
             {"name": "dan", "function": dan_criterion, "weight": dan_weight},
@@ -593,12 +605,13 @@ def fit_model(
                 sigmoid=ssl_kwargs.get("sigmoid", True),
             )
             # add DANN parameters to the optimizer
-            optimizer.add_param_group(
-                {
-                    "params": dan_criterion.dann.domain_clf.parameters(),
-                    "name": "domain_classifier",
-                }
-            )
+            for i, adv in enumerate(dan_criterion.dann):
+                optimizer.add_param_group(
+                    {
+                        "params": adv.domain_clf.parameters(),
+                        "name": f"domain_classifier_{i}",
+                    }
+                )
         else:
             dan_weight = None
 

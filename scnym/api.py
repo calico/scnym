@@ -54,7 +54,8 @@ WEIGHTS_JSON = "https://storage.googleapis.com/calico-website-scnym-storage/link
 REFERENCE_JSON = "https://storage.googleapis.com/calico-website-scnym-storage/link_tables/cell_atlas.json"
 
 ATLAS_ANNOT_KEYS = {
-    "human": "celltype",
+    "human_gtex": "cell_ontology_class",
+    "human_gtex_immune": "cell_type",
     "mouse": "cell_ontology_class",
     "rat": "cell_ontology_class",
 }
@@ -62,6 +63,7 @@ ATLAS_ANNOT_KEYS = {
 TASKS = (
     "train",
     "predict",
+    "interpret",
 )
 
 # Define configurations
@@ -74,8 +76,6 @@ CONFIGS = {
         "optimizer_name": "adadelta",
         "weight_decay": 1e-4,
         "batch_size": 256,
-        "balanced_classes": False,
-        "weighted_classes": False,
         "mixup_alpha": 0.3,
         "unsup_max_weight": 1.0,
         "unsup_mean_teacher": False,
@@ -138,10 +138,11 @@ def scnym_api(
     adata: AnnData,
     task: str = "train",
     groupby: str = None,
-    domain_groupby: str = None,
+    domain_groupby: Union[str, tuple, list] = None,
     out_path: str = "./scnym_outputs",
     trained_model: str = None,
     config: Union[dict, str] = "new_identity_discovery",
+    interpret_kwargs: dict = None,
     key_added: str = "scNym",
     copy: bool = False,
     **kwargs,
@@ -163,20 +164,22 @@ def scnym_api(
         If `"scNym_split"` in `.obs_keys()`, uses the cells annotated
         `"train", "val"` to select data splits.
     task
-        Task to perform, either "train" or "predict".
+        Task to perform, one of {"train", "predict", "interpret"}.
         If "train", uses `adata` as labeled training data.
         If "predict", uses `trained_model` to infer cell identities for
         observations in `adata`.
+        If "interpret", uses expected gradients to interpret the predictions of
+        the `trained_model`.
     groupby
         Column in `adata.obs` that contains cell identity annotations.
         Values of `"Unlabeled"` indicate that a given cell should be used
         only as unlabeled data during training.
     domain_groupby
-        Column in `adata.obs` that contains domain labels as integers.
-        Each domain of origin (e.g. batch, species) should be given a unique
-        domain label.
+        Column(s) in `adata.obs` that contains domain labels as integers.
+        Each domain of origin (e.g. batch, species) should be given a unique label.
         If `domain_groupby is None`, train and target data are each considered
-        a unique domain.
+        a unique domain. if `domain_groupby` is an Iterable[str], each is considered
+        a unique domain label and given a unique adversary.
     out_path
         Path to a directory for saving scNym model weights and training logs.
     trained_model
@@ -194,6 +197,10 @@ def scnym_api(
             when this assumption is valid.
     key_added
         Key added to `adata.obs` with scNym predictions if `task=="predict"`.
+    interpret_kwargs
+        keywords passed to `scnym.api.scnym_interpret`. must pass `source` and `target`
+        str keywords that define the source and target cell types in `groupby` to use
+        for interpretation.
     copy
         copy the AnnData object before predicting cell types.
 
@@ -374,10 +381,19 @@ def scnym_api(
 
     elif task == "interpret":
 
+        if interpret_kwargs is None:
+            msg = (
+                "must provide `interpret_kwargs` specifying `source` and `target`"
+                "classes to use for expected gradient computation if `task='interpret'"
+            )
+            raise ValueError(msg)
+
         scnym_interpret(
             adata=adata,
             config=config,
-            **kwargs,
+            groupby=groupby,
+            trained_model=trained_model,
+            **interpret_kwargs,
         )
 
     else:
@@ -469,6 +485,10 @@ def scnym_train(
             X.shape[0], size=int(np.floor(0.9 * X.shape[0])), replace=False
         )
         val_idx = np.setdiff1d(np.arange(X.shape[0]), traintest_idx)
+        # TODO record these values directly in the anndata
+        train_idx = traintest_idx[:int(X.shape[0]*0.8)]
+        test_idx = traintest_idx[int(X.shape[0]*0.8):]
+        traintest_idx = (train_idx, test_idx)
     else:
         train_idx = np.where(train_adata.obs["scNym_split"] == "train")[0]
         test_idx = np.where(
@@ -491,31 +511,44 @@ def scnym_train(
         )
 
     # check if domain labels were manually specified
+    input_domain = []
+    unlabeled_domain = []
     if config.get("domain_groupby", None) is not None:
         domain_groupby = config["domain_groupby"]
-        # check that the column actually exists
-        if domain_groupby not in adata.obs.columns:
-            msg = f"no column `{domain_groupby}` exists in `adata.obs`.\n"
-            msg += "if domain labels are specified, a matching column must exist."
-            raise ValueError(msg)
-        # get the label indices as unique integers using pd.Categorical
-        # to code each unique label with an int
-        domains = np.array(
-            pd.Categorical(
-                adata.obs[domain_groupby],
-                categories=np.unique(adata.obs[domain_groupby]),
-            ).codes,
-            dtype=np.int32,
+        domain_groupby = (
+            [domain_groupby] if type(domain_groupby)==str else domain_groupby
         )
-        # split domain labels into source and target sets for `fit_model`
-        input_domain = domains[~target_bidx]
-        unlabeled_domain = domains[target_bidx]
-        print("Using user provided domain labels.")
-        n_source_doms = len(np.unique(input_domain))
-        n_target_doms = len(np.unique(unlabeled_domain))
-        print(
-            f"Found {n_source_doms} source domains and {n_target_doms} target domains."
-        )
+        print(f"Parsing user provided domain labels for columns:\n\t{domain_groupby}")
+        for i_dgb, dgb in enumerate(domain_groupby):
+        # check that the columns actually exists
+            if dgb not in adata.obs.columns:
+                msg = f"no column `{dgb}` exists in `adata.obs`.\n"
+                msg += "if domain labels are specified, a matching column must exist."
+                raise ValueError(msg)
+            # get the label indices as unique integers using pd.Categorical
+            # to code each unique label with an int
+            domains = np.array(
+                pd.Categorical(
+                    adata.obs[dgb],
+                    categories=np.unique(adata.obs[dgb]),
+                ).codes,
+                dtype=np.int32,
+            )
+            # split domain labels into source and target sets for `fit_model`
+            dgb_input_domain = domains[~target_bidx]
+            dgb_unlabeled_domain = domains[target_bidx]
+            print(f"\tFound domain labels for {dgb}, domain label {i_dgb}.")
+            n_source_doms = len(np.unique(dgb_input_domain))
+            n_target_doms = len(np.unique(dgb_unlabeled_domain))
+            print(
+                f"\tFound {n_source_doms} source and {n_target_doms} target domains."
+            )
+            input_domain.append(dgb_input_domain)
+            unlabeled_domain.append(dgb_unlabeled_domain)
+        # unlabeled_domain elements might be empty if we had no `target_bidx` cells
+        # in full supervision mode. check for this and replace with None
+        if len(unlabeled_domain[0]) == 0:
+            unlabeled_domain = None
     else:
         # no domains manually supplied, providing `None` to `fit_model`
         # will treat source data as one domain and target data as another
@@ -549,8 +582,6 @@ def scnym_train(
         optimizer_name=config["optimizer_name"],
         weight_decay=config["weight_decay"],
         ModelClass=model.CellTypeCLF,
-        balanced_classes=config["balanced_classes"],
-        weighted_classes=config["weighted_classes"],
         out_path=config["out_path"],
         mixup_alpha=config["mixup_alpha"],
         unlabeled_counts=unlabeled_counts,
@@ -806,7 +837,7 @@ def _get_pretrained_weights(
 
 def atlas2target(
     adata: AnnData,
-    species: str,
+    atlas: str,
     key_added: str = "annotations",
 ) -> AnnData:
     """Download a preprocessed cell atlas dataset and
@@ -822,6 +853,13 @@ def atlas2target(
         names for the relevant species to match the atlas.
         e.g. `"Gapdh`" for mouse or `"GAPDH"` for human, rather
         than Ensembl gene IDs or another gene annotation.
+    atlas : str
+        reference atlas to use for training.
+        options include:
+            "mouse" - Tabula Muris reference
+            "human_gtex" - GTEx human cell atlas
+            "human_gtex_immune" - GTEx human atlas with fine-grained immune cell types
+            "rat" - Rat Aging Cell Atlas.
 
     Returns
     -------
@@ -837,7 +875,7 @@ def atlas2target(
     >>> adata = sc.datasets.pbmc3k()
     >>> joint_adata = scnym.api.atlas2target(
     ...     adata=adata,
-    ...     species='human',
+    ...     atlas='human_gtex',
     ...     key_added='annotations',
     ... )
 
@@ -849,14 +887,17 @@ def atlas2target(
     try:
         reference_dict = json.loads(requests.get(REFERENCE_JSON).text)
     except requests.exceptions.ConnectionError:
-        print("Could not download pretrained weighs listing from:")
+        print("Could not download reference atlas listing from:")
         print(f"\t{REFERENCE_JSON}")
-        print("Loading pretrained model failed.")
+        print("Loading references failed.")
 
     # check that the species presented is available
-    if species not in reference_dict.keys():
-        msg = f"pretrained weights not available for {species}."
-        raise ValueError(species)
+    if atlas not in reference_dict.keys():
+        msg = (
+            f"{atlas} is not a valid reference atlas.\n"
+            f"Please choose from: {reference_dict.keys()}"
+        )
+        raise ValueError(msg)
 
     # check that there are no gene duplications
     n_uniq_genes = len(np.unique(adata.var_names))
@@ -867,18 +908,18 @@ def atlas2target(
         raise ValueError(msg)
 
     # download the atlas of interest
-    atlas = sc.datasets._datasets.read(
-        sc.settings.datasetdir / f"atlas_{species}.h5ad",
-        backup_url=reference_dict[species],
+    atlas_adata = sc.datasets._datasets.read(
+        sc.settings.datasetdir / f"atlas_{atlas}.h5ad",
+        backup_url=reference_dict[atlas],
     )
-    del atlas.raw
+    del atlas_adata.raw
 
     # get the key used by the cell atlas
-    atlas_annot_key = ATLAS_ANNOT_KEYS[species]
+    atlas_annot_key = ATLAS_ANNOT_KEYS[atlas]
 
     # copy atlas annotations to the specified column
-    atlas.obs[key_added] = np.array(atlas.obs[atlas_annot_key])
-    atlas.obs["scNym_dataset"] = "atlas_reference"
+    atlas_adata.obs[key_added] = np.array(atlas_adata.obs[atlas_annot_key])
+    atlas_adata.obs["scNym_dataset"] = "atlas_reference"
 
     # label target data with "Unlabeled"
     adata.obs[key_added] = "Unlabeled"
@@ -887,7 +928,7 @@ def atlas2target(
     # check that at least some genes overlap between the atlas
     # and the target data
     FEW_GENES = 100
-    n_overlapping_genes = len(np.intersect1d(adata.var_names, atlas.var_names))
+    n_overlapping_genes = len(np.intersect1d(adata.var_names, atlas_adata.var_names))
     if n_overlapping_genes == 0:
         msg = "No genes overlap between the target data `adata` and the atlas.\n"
         msg += 'Genes in the atlas are named using Ensembl gene symbols (e.g. `"Gapdh"`).\n'
@@ -903,7 +944,7 @@ def atlas2target(
         logger.info(msg)
 
     # join the target and atlas data
-    joint_adata = atlas.concatenate(
+    joint_adata = atlas_adata.concatenate(
         adata,
         join="inner",
     )

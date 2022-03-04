@@ -48,10 +48,12 @@ def test_dan_pseudoconf():
     labeled_sample = {
         "input": X_0,
         "output": y_0.long(),
+        "domain": torch.zeros(X_1.size(0)) - 1,
     }
     unlabeled_sample = {
         "input": X_1,
         "output": y_1.long(),
+        "domain": torch.zeros(X_1.size(0)) - 1,
     }
 
     print("Fake data:")
@@ -170,10 +172,9 @@ def test_dan_pseudoconf():
     dan_losses = []
 
     optimizer = torch.optim.AdamW(
-        [
-            {"params": model.parameters()},
-            {"params": dan.dann.domain_clf.parameters()},
-        ],
+        [{"params": model.parameters()},] 
+        + 
+        [{"params": dan.dann[i].domain_clf.parameters()} for i in range(len(dan.dann))],
         weight_decay=1e-4,
     )
 
@@ -214,7 +215,7 @@ def test_dan_pseudoconf():
 
         # check that gradients flow to the DANN domain classifier
         dan_grad_mag = 0.0
-        for p in dan.dann.domain_clf.parameters():
+        for p in dan.dann[0].domain_clf.parameters():
             if p.grad is not None:
                 dan_grad_mag += (p.grad ** 2).sum()
         assert dan_grad_mag > 0.0
@@ -327,10 +328,9 @@ def test_dan_train():
     # run a few backprop iterations to make sure
     # we can decrease the loss and train the DANN
     optimizer = torch.optim.AdamW(
-        [
-            {"params": model.parameters()},
-            {"params": dan.dann.domain_clf.parameters()},
-        ],
+        [{"params": model.parameters()},] 
+        + 
+        [{"params": dan.dann[i].domain_clf.parameters()} for i in range(len(dan.dann))],
         weight_decay=1e-4,
     )
 
@@ -357,7 +357,7 @@ def test_dan_train():
 
         # check that gradients flow to the DANN domain classifier
         dan_grad_mag = 0.0
-        for p in dan.dann.domain_clf.parameters():
+        for p in dan.dann[0].domain_clf.parameters():
             if p.grad is not None:
                 dan_grad_mag += (p.grad ** 2).sum()
         assert dan_grad_mag > 0.0
@@ -390,7 +390,7 @@ def test_dan_train():
 
     # get a copy of the DANN parameters to show that
     # they aren't changing as we optimize the model embedding
-    dann_p_t0 = list(dan.dann.domain_clf.parameters())[0]
+    dann_p_t0 = list(dan.dann[0].domain_clf.parameters())[0]
     for i in range(50):
         optimizer.zero_grad()
         l = dan(
@@ -411,7 +411,7 @@ def test_dan_train():
         # check that gradients are going to the DANN
         # classifier, even if we're not updating them
         dan_grad_mag = 0.0
-        for p in dan.dann.domain_clf.parameters():
+        for p in dan.dann[0].domain_clf.parameters():
             if p.grad is not None:
                 dan_grad_mag += (p.grad ** 2).sum()
         assert dan_grad_mag > 0.0
@@ -420,7 +420,7 @@ def test_dan_train():
             print(f"DANN  grad mag: {dan_grad_mag}")
 
         # check that DANN parameters aren't changing
-        dann_p_t1 = list(dan.dann.domain_clf.parameters())[0]
+        dann_p_t1 = list(dan.dann[0].domain_clf.parameters())[0]
         assert torch.all(dann_p_t0 == dann_p_t1)
         dann_p_t0 = dann_p_t1
 
@@ -437,6 +437,6 @@ def test_dan_train():
 
 
 if __name__ == "__main__":
-    # test_dan_pseudoconf()
+    test_dan_pseudoconf()
     # print()
-    test_dan_train()
+    # test_dan_train()

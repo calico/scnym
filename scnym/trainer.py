@@ -403,13 +403,15 @@ class Trainer(object):
                 print("Trainer has a `dan_criterion`.")
                 if self.dan_criterion is not None:
                     print("Saving DAN weights...")
-                    torch.save(
-                        self.dan_criterion.dann.state_dict(),
-                        os.path.join(
-                            self.out_path,
-                            "02_best_dan_weights.pkl",
-                        ),
-                    )
+                    for i_adv, adv in enumerate(self.dan_criterion.dann):
+                        weights = adv.state_dict()
+                        torch.save(
+                            weights,
+                            os.path.join(
+                                self.out_path,
+                                f"02_best_dan_weights_{i_adv:03}.pkl",
+                            ),
+                        )
 
             with open(self.log_path, "a") as f:
                 f.write(
@@ -488,6 +490,12 @@ class Trainer(object):
                 logger.info(f"Early stopping at epoch {self.epoch}")
                 logger.info(">" * 5)
                 break
+
+        # save final model weights
+        torch.save(
+            self.model.state_dict(),
+            os.path.join(self.out_path, "01_final_model_weights.pkl"),
+        )            
 
         self.model.load_state_dict(
             torch.load(
@@ -784,14 +792,15 @@ class SemiSupervisedTrainer(Trainer):
                     self.epoch,
                 )
 
-                for i, param in enumerate(
-                    self.dan_criterion.dann.domain_clf.parameters()
-                ):
-                    self.tb_writer.add_histogram(
-                        f"Grad/domain_clf_{i:04}",
-                        param.grad,
-                        self.epoch,
-                    )
+                for i_adv, adv in enumerate(self.dan_criterion.dann):
+                    for i_param, param in enumerate(
+                        adv.domain_clf.parameters()
+                    ):
+                        self.tb_writer.add_histogram(
+                            f"Grad/domain_clf_adv{i_adv:03}_{i_param:04}",
+                            param.grad,
+                            self.epoch,
+                        )
                 self.tb_writer.add_scalar(
                     "SSL/dan_n_conf_pseudolabels",
                     self.dan_criterion.n_conf_pseudolabels,
@@ -964,7 +973,7 @@ class MultiTaskTrainer(Trainer):
         """
         kwargs.update({"criterion": None})
         super(MultiTaskTrainer, self).__init__(**kwargs)
-
+        self.keep_checkpoints = False # don't save every best model to disk
         self.criteria = criteria
         # check that criteria provided are actually callable
         for c in self.criteria:
@@ -1121,6 +1130,26 @@ class MultiTaskTrainer(Trainer):
                     float(weight),
                     self.epoch,
                 )
+            # TODO save embeddings
+            # self.tb_writer.add_embedding(
+            #     data["embed"].detach().cpu(),
+            #     metadata=data["domain"].detach().cpu().numpy().tolist(),
+            #     global_step=self.epoch,
+            #     tag="Embed/train",
+            # )
+            for param_name, values in dict(self.model.named_parameters()).items():
+                self.tb_writer.add_histogram(
+                    f"weight/{param_name}",
+                    values=values.data.detach().cpu().view(-1),
+                    global_step=self.epoch,
+                )
+                # grads may be `None` if parameters are frozen
+                if values.grad is not None:
+                    self.tb_writer.add_histogram(
+                        f"grad/{param_name}",
+                        values=values.grad.data.detach().cpu().view(-1),
+                        global_step=self.epoch,
+                    )
 
         return np.sum(epoch_losses)
 
@@ -1236,10 +1265,11 @@ class MultiTaskTrainer(Trainer):
         if (epoch_loss < self.best_loss) and (self.epoch >= self.min_epochs):
             self.best_loss = epoch_loss
             self.waiting_time = 0
-            torch.save(
-                self.model.state_dict(),
-                os.path.join(self.out_path, f"model_weights_{self.epoch:03d}.pkl"),
-            )
+            if self.keep_checkpoints:
+                torch.save(
+                    self.model.state_dict(),
+                    os.path.join(self.out_path, f"model_weights_{self.epoch:03d}.pkl"),
+                )
             logger.info(f"Saving best model weights, epoch {self.epoch}...")
             torch.save(
                 self.model.state_dict(),
@@ -1253,14 +1283,15 @@ class MultiTaskTrainer(Trainer):
                 if crit_fxn["function"].__class__.__name__ == "DANLoss":
                     # save DAN weights
                     logger.info("Saving DAN weights...")
-                    weights = crit_fxn["function"].dann.state_dict()
-                    torch.save(
-                        weights,
-                        os.path.join(
-                            self.out_path,
-                            f"02_best_dan_weights.pkl",
-                        ),
-                    )
+                    for i_adv, adv in enumerate(crit_fxn["function"].dann):
+                        weights = adv.state_dict()
+                        torch.save(
+                            weights,
+                            os.path.join(
+                                self.out_path,
+                                f"02_best_dan_weights_{i_adv:03}.pkl",
+                            ),
+                        )
                 elif crit_fxn["function"].__class__.__name__ == "ReconstructionLoss":
                     # save AE weights
                     logger.info("Saving Reconstruction weights...")

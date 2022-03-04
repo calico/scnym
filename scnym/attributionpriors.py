@@ -74,6 +74,14 @@ def tgini(x):
     return g
 
 
+def bgini(x):
+    """Compute the mean gini for each observation in a batch"""
+    g = torch.zeros(1)
+    for i in range(x.size(0)):
+        g += tgini(x[i, :])
+    return g/x.size(0)
+
+
 def gini_eg(shaps: torch.FloatTensor) -> torch.FloatTensor:
     """Gini coefficient sparsity prior
 
@@ -124,6 +132,29 @@ def gini_classwise_eg(
     p_obs = n_obs / torch.sum(n_obs)
     weighted_gini = torch.sum(p_obs * ginis)
     return weighted_gini
+
+
+def gini_cellwise_eg(
+    shaps: torch.FloatTensor,
+    **kwargs
+) -> torch.FloatTensor:
+    """Compute Gini coefficient sparsity prior within individual cells. 
+    This allows each cell to have a unique set of sparsely
+    activated features, rather than globally requiring all cells
+    to use the same small feature set.
+
+    Parameters
+    ----------
+    shaps : torch.FloatTensor
+        [Observations, Features] estimated Shapley values.
+
+    Returns
+    -------
+    gini_prior : torch.FloatTensor
+        inverse Gini coefficient prior penalty.
+    """
+    abs_shaps = shaps.abs()
+    return -bgini(abs_shaps)    
 
 
 def graph_eg(

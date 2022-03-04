@@ -32,10 +32,10 @@ class SingleCellDS(Dataset):
         self,
         X: Union[sparse.csr.csr_matrix, np.ndarray],
         y: Union[sparse.csr.csr_matrix, np.ndarray],
-        domain: Union[sparse.csr.csr_matrix, np.ndarray] = None,
+        domain: Union[np.ndarray, tuple] = None,
         transform: Callable = None,
         num_classes: int = -1,
-        num_domains: int = -1,
+        num_domains: Union[int, tuple] = -1,
     ) -> None:
         """
         Load single cell expression profiles.
@@ -48,14 +48,16 @@ class SingleCellDS(Dataset):
             Pathfinder models expect raw counts.
         y : np.ndarray, sparse.csr_matrix
             [Cells,] integer cell type labels.
-        domain : np.ndarray, sparse.csr_matrix
-            [Cells,] integer domain labels.
+        domain : np.ndarray, tuple[np.ndarray]
+            [Cells,] integer domain labels or tuple of ([Cells,]...[Cells,]) domain
+            labels if multi-adversarial learning is performed.
         transform : Callable
             transform to apply to samples.
         num_classes : int
             total number of classes for the task.
-        num_domains : int
-            total number of domains for the task.
+        num_domains : int, tuple[int]
+            total number of domains for the task. if a tuple is given, lists the number
+            of domains in each tuple in order.
 
         Returns
         -------
@@ -89,12 +91,25 @@ class SingleCellDS(Dataset):
             num_classes=num_classes,
         ).float()
 
+        self.num_domains = num_domains
         self.dom_labels = domain
-        if self.dom_labels is not None:
+        if self.dom_labels is not None and type(self.dom_labels)==np.ndarray:
             self.dom = torch.nn.functional.one_hot(
                 torch.from_numpy(self.dom_labels).long(),
                 num_classes=num_domains,
             ).float()
+        elif type(self.dom_labels) in (list, tuple):
+            assert len(self.dom_labels) == len(num_domains)
+            # we have multiple domain labels, we need to cast all of them to one-hot
+            # then concatenate them together
+            one_hot_separate = []
+            for i, dl in enumerate(self.dom_labels):
+                dom = torch.nn.functional.one_hot(
+                    torch.from_numpy(dl).long(), num_classes=num_domains[i],
+                )
+                one_hot_separate.append(dom)
+            self.dom = torch.cat(one_hot_separate, dim=1)
+            assert torch.sum(self.dom[0, :]) == len(num_domains)
         else:
             self.dom = np.zeros_like(self.y) - 1
 

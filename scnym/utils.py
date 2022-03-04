@@ -1,6 +1,11 @@
 """
 Utility functions
 """
+from typing import Union, Callable, Tuple
+import glob
+import os
+import traceback
+
 import torch
 import numpy as np
 import anndata
@@ -11,7 +16,9 @@ from scipy import stats
 import scanpy as sc
 from sklearn.neighbors import NearestNeighbors, KNeighborsRegressor
 from sklearn.metrics.pairwise import euclidean_distances
-from typing import Union, Callable
+
+# tensorboard record accumulation
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 
 def make_one_hot(
@@ -82,7 +89,7 @@ def l1_layer0(
 def append_categorical_to_data(
     X: Union[np.ndarray, sparse.csr.csr_matrix],
     categorical: np.ndarray,
-) -> (Union[np.ndarray, sparse.csr.csr_matrix], np.ndarray):
+) -> Tuple[Union[np.ndarray, sparse.csr.csr_matrix], np.ndarray]:
     """Convert `categorical` to a one-hot vector and append
     this vector to each sample in `X`.
 
@@ -221,6 +228,7 @@ def build_classification_matrix(
     gene_idx = 0
     n_batches = int(np.ceil(N.shape[1] / gene_batch_size))
     for b in tqdm.tqdm(range(n_batches), desc="copying gene batches"):
+        # get the gene indices that match between model genes and sample genes
         model_batch_idx = model_genes_indices[gene_idx : gene_idx + gene_batch_size]
         sample_batch_idx = sample_genes_indices[gene_idx : gene_idx + gene_batch_size]
         N[:, model_batch_idx] = X[:, sample_batch_idx]
@@ -741,3 +749,106 @@ def find_low_confidence_cells(
         "leiden"
     ].apply(lambda x: f"Low Confidence {x}")
     return
+
+
+def find_jackpots(
+    X: Union[np.ndarray, sparse.csr_matrix],
+    n_high_genes: int=1,
+    max_prop: float=0.8,
+) -> np.ndarray:
+    """Find cells where an overwhelming majority of reads map to
+    just a few transcripts
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        [Cells, Genes] log1p(CPM) matrix.
+    n_high_genes : int
+        check for the proportion of reads mapping to the top
+        `n_high_genes` genes.
+    max_prop : float
+        maximum proportion of reads mapping to `n_high_genes`.
+        
+    Returns
+    -------
+    bidx : np.ndarray
+        boolean mask of jackpot cells.
+    """
+    # convert to proportions
+    cpm = np.expm1(X)
+    # abund sums to 1 along columns
+    abund = cpm / cpm.sum(1).reshape(-1, 1)
+    # high to low along columns
+    sorted_abund = np.sort(abund, axis=1)[:, ::-1]
+    prop_hot = sorted_abund[:, :n_high_genes].sum(1)
+    bidx = prop_hot > max_prop
+    return bidx
+
+"""Tensorboard utilities"""
+
+
+def tflog2pandas(path: str) -> pd.DataFrame:
+    """Convert a single tensorflow log file to pandas DataFrame
+
+    Parameters
+    ----------
+    path : str
+        path to tensorflow log file directory
+
+    Returns
+    -------
+    pd.DataFrame
+        converted dataframe
+
+    References
+    ----------
+    https://bit.ly/31o4fz4
+    """
+    DEFAULT_SIZE_GUIDANCE = {
+        "compressedHistograms": 1,
+        "images": 1,
+        "scalars": 0,  # 0 means load all
+        "histograms": 1,
+    }
+    runlog_data = pd.DataFrame({"metric": [], "value": [], "step": []})
+    try:
+        event_acc = EventAccumulator(path, DEFAULT_SIZE_GUIDANCE)
+        event_acc.Reload()
+        tags = event_acc.Tags()["scalars"]
+        for tag in tags:
+            event_list = event_acc.Scalars(tag)
+            values = list(map(lambda x: x.value, event_list))
+            step = list(map(lambda x: x.step, event_list))
+            r = {"metric": [tag] * len(step), "value": values, "step": step}
+            r = pd.DataFrame(r)
+            runlog_data = pd.concat([runlog_data, r])
+    # Dirty catch of DataLossError
+    except Exception:
+        print("Event file possibly corrupt: {}".format(path))
+        traceback.print_exc()
+    return runlog_data
+
+
+def tflog2pandas_bulk(path: str, tblog_glob: str="tblog"):
+    """Convert a series of Tensorboard logging directories to a large DataFrame
+    
+    Parameters
+    ----------
+    path : str
+        root directory containing a set of tensorboard log subdirectories.
+        logs do not need to be direct children.
+    tblog_glob : str
+        glob string to separate tensorboard directories.
+    
+    Returns
+    -------
+    pd.DataFrame
+        columns [metric, value, step, directory]
+    """
+    tb_log_dirs = sorted(glob.glob(os.path.join(path, "*"+tblog_glob+"*")))
+    dfs = []
+    for log_path in tb_log_dirs:
+        df = tflog2pandas(path=log_path)
+        df["directory"] = log_path
+        dfs.append(df)
+    return pd.concat(dfs, axis=0)

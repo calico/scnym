@@ -1152,12 +1152,21 @@ class DANLoss(nn.Module):
         # below.
         if unlabeled_sample is None:
             t = torch.FloatTensor().to(device=labeled_sample["input"].device)
-            unlabeled_sample = {k: t for k in ["input", "domain"]}
+            unlabeled_sample["input"]  = t
+            unlabeled_sample["domain"] = t.long()
         # we also ignore the unlabeled data if it doesn't have a domain label
-        # associated with it. null domain labels are `-1`, so this checks absence/null.
-        if torch.sum(unlabeled_sample.get("domain", torch.tensor([-1,])) < 0 ) > 0:
+        # associated with it AND we have domain labels for the source data
+        # null domain labels are `-1`, so this checks absence/null.
+        u_domain_null = (
+            torch.sum(unlabeled_sample.get("domain", torch.tensor([-1,])) < 0 ) > 0
+        )
+        l_domain_null = (
+            torch.sum(labeled_sample.get("domain", torch.tensor([-1,])) < 0 ) > 0
+        )
+        if u_domain_null and not l_domain_null:
             t = torch.FloatTensor().to(device=labeled_sample["input"].device)
-            unlabeled_sample = {k: t for k in ["input", "domain"]}       
+            unlabeled_sample["input"]  = t
+            unlabeled_sample["domain"] = t.long()
 
         ########################################
         # (1) Create domain labels
@@ -1179,7 +1188,7 @@ class DANLoss(nn.Module):
             # if multiple domains are present, one-hot labels are concatenated
             # along the dim=1 dimension, so we will need to split them using info
             # in `self.n_domains` later
-            source_label = labeled_sample["domain"]
+            source_label = labeled_sample["domain"].long()
         source_label = source_label.to(device=labeled_sample["input"].device)
 
         if torch.sum(unlabeled_sample.get("domain", torch.Tensor([-1])) == -1) > 0:
@@ -1195,6 +1204,7 @@ class DANLoss(nn.Module):
 
         lx = labeled_sample["input"]
         ux = unlabeled_sample["input"]
+        
 
         ########################################
         # (2) Check confidence of unlabeled obs
@@ -1215,7 +1225,7 @@ class DANLoss(nn.Module):
         ########################################
 
         x = torch.cat([lx, ux], 0)
-        dlabel = torch.cat([source_label, target_label], 0)
+        dlabel = torch.cat([source_label.long(), target_label.long()], 0)
 
         # predict each domain variable with a separate adversary
         dan_loss = torch.zeros(1,).to(device=lx.device)
@@ -1801,7 +1811,6 @@ class StructuredSparsity(object):
         self.n_dense_latent = n_dense_latent
         self.group_lasso = group_lasso
         self.p_norm = p_norm
-        self.nonnegative = nonnegative
 
         if prior_matrix is None and gene_sets is None:
             msg = "Must provide either a prior_matrix or gene_sets to use."
@@ -1893,17 +1902,7 @@ class StructuredSparsity(object):
         prior_norm = torch.norm(P[:n_latent], p=self.p_norm)
         logger.debug(f"l1 {prior_norm}")
 
-        if self.nonnegative:
-            # place an optional non-negativity penalty on genes within the gene set
-            # nonneg_inset = W * self.prior_matrix.float().to(device=W.device)
-            # nonneg_norm = torch.norm(nonneg_inset[nonneg_inset < 0], p=self.p_norm)
-            W_flat = W.view(-1)
-            bidx = (W_flat < 0.0).bool()
-            W_flat[bidx] = 0.0
-        else:
-            nonneg_norm = 0.0
-
-        r = prior_norm + nonneg_norm
+        r = prior_norm
         return r
 
     def train(self, *args, **kwargs) -> None:
@@ -2418,6 +2417,7 @@ class AttrPrior(nn.Module):
         """Get expected gradients for the first layer activations"""
         embedder_model = copy.deepcopy(model.get_initial_embedder())
         embedder_model.train(False)
+        model_device = list(embedder_model.parameters())[0].device
 
         score_model = nn.Sequential(
             *model.mid_stack,
@@ -2437,7 +2437,7 @@ class AttrPrior(nn.Module):
         logger.debug(f"score_model: {smdl}")
 
         def batch_transformation(x):
-            y = embedder_model(x)
+            y = embedder_model(x.to(device=model_device))
             return y.detach()
 
         # embed the input
@@ -2450,7 +2450,7 @@ class AttrPrior(nn.Module):
         exp_grad = self.APExp.shap_values(
             model=score_model,
             input_tensor=embedded_input_,
-            sparse_labels=target,
+            sparse_labels=target.to(device=model_device),
             batch_transformation=batch_transformation,
         )
         return exp_grad

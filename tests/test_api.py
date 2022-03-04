@@ -207,12 +207,35 @@ def test_atlas2target():
 
     joint_adata = atlas2target(
         adata=adata,
-        species="mouse",
+        atlas="mouse",
         key_added="annotations",
     )
 
     assert "annotations" in joint_adata.obs.keys()
     assert np.sum(joint_adata.obs["annotations"] == "Unlabeled") == adata.shape[0]
+
+    adata = sc.datasets.pbmc3k()
+    sc.pp.normalize_total(adata, target_sum=1e6)
+    sc.pp.log1p(adata)
+    # test human atlases
+    joint_adata = atlas2target(
+        adata=adata,
+        atlas="human_gtex",
+        key_added="annotations",
+    )
+
+    assert "annotations" in joint_adata.obs.keys()
+    assert np.sum(joint_adata.obs["annotations"] == "Unlabeled") == adata.shape[0]    
+
+    # test human atlases
+    joint_adata = atlas2target(
+        adata=adata,
+        atlas="human_gtex_immune",
+        key_added="annotations",
+    )
+
+    assert "annotations" in joint_adata.obs.keys()
+    assert np.sum(joint_adata.obs["annotations"] == "Unlabeled") == adata.shape[0]    
 
     return
 
@@ -225,7 +248,7 @@ def test_sslwithatlas():
 
     joint_adata = atlas2target(
         adata=adata,
-        species="mouse",
+        atlas="mouse",
         key_added="annotations",
     )
     # downsample to speed up the test
@@ -405,6 +428,83 @@ def test_user_domains():
 
 
 @cuda_only
+def test_user_multidomains():
+    """Test scNym training and prediction with multiple user supplied domain
+    labels for each cell."""
+    np.random.seed(1)
+    # load a testing dataset
+    adata = sc.datasets._datasets.read(
+        sc.settings.datasetdir / "kang17.h5ad", backup_url=TEST_URL
+    )
+    target_bidx = adata.obs["stim"] == "stim"
+    adata.obs["cell"] = np.array(adata.obs["cell"])
+    adata.obs["ground_truth"] = np.array(adata.obs["cell"])
+    adata.obs.loc[target_bidx, "cell"] = "Unlabeled"
+
+    # downsample to speed up testing
+    ridx = np.random.choice(
+        adata.shape[0],
+        size=2048,
+        replace=False,
+    )
+    adata = adata[ridx, :].copy()
+
+    # use individual patients AND batch label as unique domain labels
+    domain_groupby = ["ind", "batch"]
+
+    target_bidx = adata.obs["stim"] == "stim"
+    adata.obs["scNym_split"] = np.random.choice(
+        ["train", "test", "val"],
+        size=adata.shape[0],
+        p=[0.8, 0.1, 0.1],
+        replace=True,
+    )
+    print("train samples = ", np.sum(adata.obs["scNym_split"] == "train"))
+    print("test  samples = ", np.sum(adata.obs["scNym_split"] == "test"))
+    print("val   samples = ", np.sum(adata.obs["scNym_split"] == "val"))
+
+    # train an scNym model
+    config = {"n_epochs": 1, "domain_groupby": domain_groupby}
+    scnym_api(
+        adata=adata,
+        task="train",
+        groupby="cell",
+        out_path=str(sc.settings.datasetdir),
+        config=config,
+    )
+
+    assert "scNym_train_results" in adata.uns.keys()
+    assert osp.exists(
+        osp.join(str(sc.settings.datasetdir), "00_best_model_weights.pkl")
+    )
+
+    # predict cell types with an scNym model
+    scnym_api(
+        adata=adata,
+        task="predict",
+        key_added="scNym",
+        out_path=str(sc.settings.datasetdir),
+        trained_model=str(sc.settings.datasetdir),
+        config=config,
+    )
+
+    assert "X_scnym" in adata.obsm.keys()
+    assert "scNym" in adata.obs.columns
+
+    # check accuracy
+    target_gt = np.array(adata.obs.loc[target_bidx, "ground_truth"])
+    pred = np.array(adata.obs.loc[target_bidx, "scNym"])
+    print("Example Truth vs. Prediction")
+    for i in range(10):
+        print(f"{target_gt[i]}\t|\t{pred[i]}")
+    print()
+    acc = np.sum(target_gt == pred) / len(pred) * 100
+    print(f"Accuracy on target set: {acc:.03f}%")
+
+    return
+
+
+@cuda_only
 def test_user_domains_supervised():
     """Test scNym training and prediction with user supplied domain
     labels for each cell *when only supervised data is present*."""
@@ -479,6 +579,84 @@ def test_user_domains_supervised():
     print(f"Accuracy on target set: {acc:.03f}%")
 
     return
+
+
+@cuda_only
+def test_user_multidomains_supervised():
+    """Test scNym training and prediction with user supplied domain
+    labels for each cell *when only supervised data is present*."""
+    np.random.seed(1)
+    # load a testing dataset
+    adata = sc.datasets._datasets.read(
+        sc.settings.datasetdir / "kang17.h5ad", backup_url=TEST_URL
+    )
+    adata.obs["cell"] = np.array(adata.obs["cell"])
+    adata.obs["ground_truth"] = np.array(adata.obs["cell"])
+
+    # downsample to speed up testing
+    ridx = np.random.choice(
+        adata.shape[0],
+        size=2048,
+        replace=False,
+    )
+    adata = adata[ridx, :].copy()
+
+    # use individual patients AND stimulation conditions as unique domain labels
+    domain_groupby = ["ind", "stim"]
+
+    adata.obs["scNym_split"] = np.random.choice(
+        ["train", "test", "val"],
+        size=adata.shape[0],
+        p=[0.8, 0.1, 0.1],
+        replace=True,
+    )
+    print("train samples = ", np.sum(adata.obs["scNym_split"] == "train"))
+    print("test  samples = ", np.sum(adata.obs["scNym_split"] == "test"))
+    print("val   samples = ", np.sum(adata.obs["scNym_split"] == "val"))
+
+    # train an scNym model
+    config = {
+        "n_epochs": 3,
+    }
+    scnym_api(
+        adata=adata,
+        task="train",
+        groupby="cell",
+        domain_groupby=domain_groupby,
+        out_path=str(sc.settings.datasetdir),
+        config=config,
+    )
+
+    assert "scNym_train_results" in adata.uns.keys()
+    assert osp.exists(
+        osp.join(str(sc.settings.datasetdir), "00_best_model_weights.pkl")
+    )
+
+    # predict cell types with an scNym model
+    scnym_api(
+        adata=adata,
+        task="predict",
+        key_added="scNym",
+        out_path=str(sc.settings.datasetdir),
+        trained_model=str(sc.settings.datasetdir),
+        config=config,
+    )
+
+    assert "X_scnym" in adata.obsm.keys()
+    assert "scNym" in adata.obs.columns
+
+    # check accuracy
+    target_gt = np.array(adata.obs.loc[:, "ground_truth"])
+    pred = np.array(adata.obs.loc[:, "scNym"])
+    print("Example Truth vs. Prediction")
+    for i in range(10):
+        print(f"{target_gt[i]}\t|\t{pred[i]}")
+    print()
+    acc = np.sum(target_gt == pred) / len(pred) * 100
+    print(f"Accuracy on target set: {acc:.03f}%")
+
+    return
+
 
 
 @cuda_only
@@ -653,16 +831,20 @@ def main():
     #     test_assumption_checking()
     #     print('<-- test_pretrained')
     #     test_pretrained()
-    #     print('<-- test_atlas2target')
-    #     test_atlas2target()
+    # print('<-- test_atlas2target')
+    # test_atlas2target()
     #     print('<-- test_sslwithatlas')
     #     test_sslwithatlas()
     #     print('<-- test_user_indices')
     #     test_user_indices()
     #     print('<-- test_user_domains')
     #     test_user_domains()
+    # print("<-- test_user_multidomains")
+    # test_user_multidomains()
     print("<-- test_user_domains_supervised")
     test_user_domains_supervised()
+    # print("<-- test_user_multidomains_supervised")
+    # test_user_multidomains_supervised()    
     #     print('<-- test_tuning')
     #     test_tune()
     #     print('<-- test_tune_provide_splits')
