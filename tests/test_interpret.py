@@ -7,7 +7,22 @@ import pandas as pd
 import torch
 import scanpy as sc
 
+from tests.test_api import cuda_only
+
 sys.path.append("../")
+
+
+def cuda_only(func):
+    """Decorator that sets a test to run only if CUDA is available"""
+
+    def wrap_cuda_only():
+        if not torch.cuda.is_available():
+            print("Test only run if CUDA compute device is available.")
+            return
+        else:
+            func()
+
+    return wrap_cuda_only
 
 
 def _load_10x_pbmc():
@@ -37,6 +52,7 @@ def _load_10x_pbmc():
     return adata
 
 
+@cuda_only
 def test_expgrad():
     import scnym
     from scnym.dataprep import SingleCellDS

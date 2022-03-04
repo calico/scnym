@@ -9,6 +9,19 @@ import torch
 sys.path.append("../")
 
 
+def cuda_only(func):
+    """Decorator that sets a test to run only if CUDA is available"""
+
+    def wrap_cuda_only():
+        if not torch.cuda.is_available():
+            print("Test only run if CUDA compute device is available.")
+            return
+        else:
+            func()
+
+    return wrap_cuda_only
+
+
 def test_dan_pseudoconf():
     """Test pseudolabel confidence mechanism for DAN"""
     import scnym
@@ -240,6 +253,7 @@ def test_dan_pseudoconf():
     return
 
 
+@cuda_only
 def test_dan_train():
     """Test training a DANN on fake data that is easy
     to discriminate from three fake domains"""

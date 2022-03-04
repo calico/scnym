@@ -157,6 +157,7 @@ def test_assumption_checking():
     return
 
 
+@cuda_only
 def test_pretrained():
     """Test that pretrained models are disabled"""
     np.random.seed(1)
@@ -199,6 +200,7 @@ def test_pretrained():
     return
 
 
+@cuda_only
 def test_atlas2target():
     np.random.seed(1)
     adata = sc.datasets.paul15()
@@ -759,6 +761,7 @@ def test_tune_provide_splits():
     return
 
 
+@cuda_only
 def test_scnym_interpret():
     """Test interpretation of trained scNym models"""
     ##########################################
@@ -841,8 +844,8 @@ def main():
     #     test_user_domains()
     # print("<-- test_user_multidomains")
     # test_user_multidomains()
-    print("<-- test_user_domains_supervised")
-    test_user_domains_supervised()
+    # print("<-- test_user_domains_supervised")
+    # test_user_domains_supervised()
     # print("<-- test_user_multidomains_supervised")
     # test_user_multidomains_supervised()    
     #     print('<-- test_tuning')
