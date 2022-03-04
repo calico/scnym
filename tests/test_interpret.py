@@ -7,7 +7,6 @@ import pandas as pd
 import torch
 import scanpy as sc
 
-from tests.test_api import cuda_only
 
 sys.path.append("../")
 
