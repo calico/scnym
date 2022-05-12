@@ -1,0 +1,10 @@
+rest	skeletal muscle satellite cell	Myod1;Myog;Pax7;Pax3;Tcf4	placeholder
+rest	skeletal muscle satellite stem cell	Myod1;Myog;Pax7;Pax3;Tcf4	placeholder
+rest	B cell	Pax5;Ikzf1;Ebf1;Tcf3	placeholder
+rest	T cell	T;Eomes;Tbx21;Tcf7;Gata3;Runx1;Runx3	placeholder
+rest	hepatocyte	Hnf1a;Hnf4a;Onecut1;Gata4;Foxa1;Foxa2;Foxa3;Creb3l3	placeholder
+rest	oligodendrocyte	Olig1;Olig2	placeholder
+rest	macrophage	Irf5;Irf1;Irf8;Stat1;Cebpe	placeholder
+rest	keratinocyte	Mafb;Trp63;Grhl2;Tfap2a	placeholder
+rest	microglial cell	Spi1;Mafb;Irf8;Runx1	placeholder
+rest	classical monocyte	Spi1;Klf4;Irf8;Nr4a1;Cebpa;Cebpb	placeholder

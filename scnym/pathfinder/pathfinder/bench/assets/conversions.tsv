@@ -1,0 +1,27 @@
+source	target	factors	citation
+fibroblast	neuron	Ascl1;Myt1l;Olig2;Pou3f2;Pou3f4;Zic1	Vierbuchen et. al. 2010
+fibroblast	dopaminergic neuron	Ascl1;Nr4a2;Lmx1a;Lmx1b	Caiazzo et. al. 2011
+fibroblast	dopaminergic neuron	Ascl1;Nr4a2;Pou3f2;Lmx1a;Foxa2	Pfister et. al. 2011
+astrocyte	neuron	Neurod1	Guo et. al. 2013
+astrocyte	neuron	Ascl1;Lmx1a;Nr4a2	Torper et. al. 2013
+astrocyte	dopaminergic neuron	Ascl1;Lmx1b;Nr4a2	Addis et. al. 2011
+astrocyte	neuron	Sox2	Su et. al. 2014
+T cell	neuron	Pou3f2;Ascl1;Myt1l;Neurog2	Tanabe et. al. 2018
+astrocyte	neuron	Nr4a2;Neurog2	Mattugini et. al. 2019
+fibroblast	skeletal muscle myoblast	Myod1	Davis et. al. 1987
+B cell	macrophage	Cebpa;Cebpb	Xu et. al. 2004
+fibroblast	embryonic stem cell	Sox2;Pou5f1;Myc;Klf4;Lin28a;Lin28b;Nanog;Mycl;Klf5	Takahashi 2006 et. al.; others
+pancreatic acinar cell	pancreatic beta cell	Neurog3;Pdx1;Mafa	Zhou et. al. 2008
+pancreatic acinar cell	pancreatic B cell	Neurog3;Pdx1;Mafa	Zhou et. al. 2008
+fibroblast	hepatocyte	Gata4;Hnf1a;Foxa3	Huang et. al. 2011
+fibroblast	cardiac muscle cell	Gata4;Mef2c;Tbx5	Qian et. al. 2012
+fibroblast	cardiac muscle cell	Gata4;Mef2c;Tbx5;Hand2	Song et. al. 2012
+fibroblast	cardiac muscle cell	Gata4;Mef2c;Tbx5;Hand2;Mesp1;Esrrg;Zfpm2	Fu et. al. 2013
+fibroblast	cardiomyocyte	Gata4;Mef2c;Tbx5	Qian et. al. 2012
+fibroblast	cardiomyocyte	Gata4;Mef2c;Tbx5;Hand2	Song et. al. 2012
+fibroblast	cardiomyocyte	Gata4;Mef2c;Tbx5;Hand2;Mesp1;Esrrg;Zfpm2	Fu et. al. 2013
+fibroblast	hematopoietic progenitor cell	Erg;Gata2;Lmo2;Runx1;Stil	Batta et. al. 2014
+fibroblast	hepatocyte	Foxa1;Foxa2;Foxa3;Gata4;Hnf1a;Hnf4a	Rezvani et. al. 2016
+hepatic stellate cell	hepatocyte	Foxa1;Foxa2;Foxa3;Gata4;Hnf1a;Hnf4a	Rezvani et. al. 2016
+fibroblast	hepatocyte	Foxa3;Gata4;Hnf1a;Hnf4a	Song et. al. 2016
+fibroblast	endothelial cell	Etv2	Bersini et. al. 2020

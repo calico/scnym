@@ -1,0 +1,4 @@
+include pathfinder/bench/assets/*.csv
+include pathfinder/bench/assets/*.gmt
+include pathfinder/bench/assets/*.txt
+include pathfinder/bench/assets/*.tsv

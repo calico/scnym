@@ -1,0 +1,15 @@
+source	target	factors	citation
+fibroblast	neuron	ASCL1;MYT1L;NEUROD1;NEUROG2;NR4A2;LMX1A;LMX1B;OLIG2;POU3F2;POU3F4;SOX2;ZIC1	Vierbuchen et. al. 2010
+astrocyte	neuron	ASCL1;MYT1L;NEUROD1;NEUROG2;NR4A2;LMX1A;LMX1B;OLIG2;POU3F2;POU3F4;SOX2;ZIC1	Vierbuchen et. al. 2010
+T cell	neuron	POU3F2;ASCL1;MYT1L;NEUROG2	Tanabe et. al. 2018
+fibroblast	skeletal muscle satellite cell	MYOD1;MYOG;PAX7	Davis et. al. 1987
+fibroblast	embryonic stem cell	SOX2;POU5f1;Myc;KLF4;LIN28A;LIN28B;NANOG;MYCL;KLF5	Takahashi 2006 et. al.; others
+pancreatic acinar cell	pancreatic beta cell	NEUROG3;PDX1;MAFA	Zhou et. al. 2008
+pancreatic acinar cell	pancreatic B cell	NEUROG3;PDX1;MAFA	Zhou et. al. 2008
+fibroblast	cardiac muscle cell	GATA4;MEF2C;TBX5;HAND2;MESP1;ESRRG;ZFPM2	Fu et. al. 2013
+fibroblast	cardiomyocyte	GATA4;MEF2C;TBX5;HAND2;MESP1;ESRRG;ZFPM2	Fu et. al. 2013
+fibroblast	hematopoietic progenitor cell	ERG;GATA2;LMO2;RUNX1;STIL	Batta et. al. 2014
+fibroblast	hepatocyte	FOXA1;FOXA2;FOXA3;GATA4;HNF1A;HNF4A	Rezvani et. al. 2016
+hepatic stellate cell	hepatocyte	FOXA1;FOXA2;FOXA3;GATA4;HNF1A;HNF4A	Rezvani et. al. 2016
+fibroblast	endothelial cell	ETV2	Bersini et. al. 2020
+fibroblast	mature keratinocyte	MAFB;TRP63;GRHL2;TFAP2A	placeholder
