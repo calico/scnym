@@ -54,7 +54,8 @@ WEIGHTS_JSON = "https://storage.googleapis.com/calico-website-scnym-storage/link
 REFERENCE_JSON = "https://storage.googleapis.com/calico-website-scnym-storage/link_tables/cell_atlas.json"
 
 ATLAS_ANNOT_KEYS = {
-    "human": "celltype",
+    "human_gtex": "cell_type",
+    "human_gtex_immune": "cell_type",
     "mouse": "cell_ontology_class",
     "rat": "cell_ontology_class",
 }
@@ -822,6 +823,11 @@ def atlas2target(
         names for the relevant species to match the atlas.
         e.g. `"Gapdh`" for mouse or `"GAPDH"` for human, rather
         than Ensembl gene IDs or another gene annotation.
+    species : str
+        One of "human_gtex", "human_gtex_immune", "mouse",
+        or "rat".
+    key_added: str
+        Name to use for the column where cell labels are added
 
     Returns
     -------
