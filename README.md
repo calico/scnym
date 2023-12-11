@@ -108,7 +108,8 @@ $ conda activate scnym_env
 Once the environment is set up, simply run:
 
 ```bash
-$ pip install scnym
+$ cd scnym
+$ pip install -e ./
 ```
 
 After installation completes, you should be able to import `scnym` in Python and run `scNym` as a command line tool:
