@@ -1,0 +1,45 @@
+Metadata-Version: 2.1
+Name: scnym
+Version: 0.3.3
+Summary: Semi supervised adversarial network networks for single cell classification
+Home-page: http://github.com/calico/scnym
+Author: Jacob C. Kimmel, David R. Kelley
+Author-email: jacobkimmel+scnym@gmail.com, drk@calicolabs.com
+License: Apache
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Requires-Python: >=3.6
+License-File: LICENSE
+Requires-Dist: anndata==0.7.4
+Requires-Dist: ConfigArgParse==1.1
+Requires-Dist: h5py==2.10.0
+Requires-Dist: leidenalg==0.8.0
+Requires-Dist: louvain==0.7.0
+Requires-Dist: numba==0.49.1
+Requires-Dist: numpy==1.18.2
+Requires-Dist: numpy-groupies==0.9.13
+Requires-Dist: pandas==1.0.4
+Requires-Dist: pytest==5.4.1
+Requires-Dist: python-dateutil==2.8.1
+Requires-Dist: PyYAML==5.3.1
+Requires-Dist: requests==2.26.0
+Requires-Dist: requests-cache==0.5.2
+Requires-Dist: requests-oauthlib==1.3.0
+Requires-Dist: requests-toolbelt==0.9.1
+Requires-Dist: scanpy==1.6.0
+Requires-Dist: scikit-learn==0.22.2.post1
+Requires-Dist: scikit-misc==0.1.3
+Requires-Dist: scipy==1.4.1
+Requires-Dist: six==1.14.0
+Requires-Dist: tensorboard==2.2.1
+Requires-Dist: tensorboard-plugin-wit==1.6.0.post2
+Requires-Dist: tensorboardX==2.1
+Requires-Dist: torch==1.4.0
+Requires-Dist: torchvision==0.5.0
+Requires-Dist: tqdm==4.44.1
+Requires-Dist: umap-learn==0.3.10
+Requires-Dist: urllib3==1.26.6
+Requires-Dist: protobuf==3.20.*
+
+scNym uses the semi-supervised MixMatch framework and domain adversarial training to take advantage of information in both the labeled and unlabeled datasets.
