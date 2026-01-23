@@ -714,8 +714,8 @@ class MixMatchLoss(InterpolationConsistencyLoss):
         # (confident_bool, highest_conf_score)
         self.running_confidence_scores.append(
             (
-                confident.detach().cpu(),
-                highest_conf.detach().cpu(),
+                confident.detach().clone().cpu(),
+                highest_conf.detach().clone().cpu(),
             ),
         )
 
@@ -809,9 +809,13 @@ class MixMatchLoss(InterpolationConsistencyLoss):
         conf_unlabeled_sample = {}
         ucnf_unlabeled_sample = {}
 
+        pseudolabel_confidence_np = pseudolabel_confidence.cpu().numpy()
+        pseudolabel_confidence_indices = np.where(pseudolabel_confidence_np)[0]
+        pseudolabel_not_confident_indices = np.where(~pseudolabel_confidence_np)[0]
+
         for k in unlabeled_sample.keys():
-            conf_unlabeled_sample[k] = unlabeled_sample[k][pseudolabel_confidence]
-            ucnf_unlabeled_sample[k] = unlabeled_sample[k][~pseudolabel_confidence]
+            conf_unlabeled_sample[k] = unlabeled_sample[k][pseudolabel_confidence_indices]
+            ucnf_unlabeled_sample[k] = unlabeled_sample[k][pseudolabel_not_confident_indices]
 
         # unlabeled samples come BEFORE labeled samples
         # in the concatenated sample
