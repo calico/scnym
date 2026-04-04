@@ -9,13 +9,9 @@ import logging
 from typing import Callable, Iterable, Union, List
 from .dataprep import SampleMixUp
 from .utils import compute_entropy_of_mixing
-from .model import CellTypeCLF, DANN
-import copy
-from torch.utils.tensorboard import SummaryWriter
-
-from .dataprep import SampleMixUp
-from .utils import compute_entropy_of_mixing
 from .model import CellTypeCLF, DANN, AE
+import copy
+from tensorboardX import SummaryWriter
 from .losses import *
 
 

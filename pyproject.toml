@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 127
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E9",   # Runtime errors
+    "F63",  # Invalid print format
+    "F7",   # Syntax errors
+    "F82",  # Undefined names
+    "F",    # Pyflakes
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+]
+ignore = [
+    "E501",  # line too long (handled by formatter if desired)
+    "E741",  # ambiguous variable name (common in scientific code)
+    "F401",  # unused imports (star imports in losses)
+    "F403",  # star imports
+    "F405",  # may be undefined from star import
+    "E722",  # bare except
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

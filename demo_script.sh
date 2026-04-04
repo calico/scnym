@@ -26,7 +26,7 @@ mv 15467792 lung.h5ad
 # export metadata as a separate CSV for scNym
 echo "EXPORTING METADATA AND GENE NAMES"
 echo "NORMALIZING COUNTS TO LOG(CPM + 1)"
-python -c "import anndata; import numpy as np; import scanpy.api as sc; a=anndata.read_h5ad('lung.h5ad'); a.obs.to_csv('metadata.csv'); np.savetxt('gene_names.csv', a.var_names, fmt='%s'); sc.pp.normalize_per_cell(a, counts_per_cell_after=1e6); sc.pp.log1p(a); a.write_h5ad('lung.h5ad')"
+python -c "import anndata; import numpy as np; import scanpy as sc; a=anndata.read_h5ad('lung.h5ad'); a.obs.to_csv('metadata.csv'); np.savetxt('gene_names.csv', a.var_names, fmt='%s'); sc.pp.normalize_total(a, target_sum=1e6); sc.pp.log1p(a); a.write_h5ad('lung.h5ad')"
 
 # return to the original directory
 cd -

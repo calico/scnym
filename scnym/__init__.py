@@ -1,6 +1,6 @@
 __author__ = "Jacob C. Kimmel, David R. Kelley"
 __email__ = "jacobkimmel+scnym@gmail.com, drk@calicolabs.com"
-__version__ = "0.3.4"
+__version__ = "0.4.0"
 
 # populate the namespace so top level imports work
 # e.g.

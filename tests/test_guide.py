@@ -101,13 +101,13 @@ def test_sparsity_loss():
 
     # load 10x human PBMC data as a sample
     adata = sc.datasets.pbmc3k()
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
     sc.pp.highly_variable_genes(adata, n_top_genes=2000)
     sc.pp.pca(adata)
     sc.pp.neighbors(adata, n_neighbors=15)
     # generate clusters to use as class labels
-    sc.tl.leiden(adata, resolution=0.5, key_added="leiden")
+    sc.tl.leiden(adata, resolution=0.5, key_added="leiden", flavor="igraph", n_iterations=2)
 
     adata.obs["class"] = pd.Categorical(
         adata.obs["leiden"],
@@ -281,13 +281,13 @@ def test_nonneg_guide():
 
     # load 10x human PBMC data as a sample
     adata = sc.datasets.pbmc3k()
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
     sc.pp.highly_variable_genes(adata, n_top_genes=2000)
     sc.pp.pca(adata)
     sc.pp.neighbors(adata, n_neighbors=15)
     # generate clusters to use as class labels
-    sc.tl.leiden(adata, resolution=0.5, key_added="leiden")
+    sc.tl.leiden(adata, resolution=0.5, key_added="leiden", flavor="igraph", n_iterations=2)
 
     adata.obs["class"] = pd.Categorical(
         adata.obs["leiden"],

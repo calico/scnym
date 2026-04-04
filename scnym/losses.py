@@ -371,7 +371,11 @@ class InterpolationConsistencyLoss(nn.Module):
             # normalization statistics
             for m in self.teacher.modules():
                 if isinstance(m, nn.BatchNorm1d):
-                    assert m.track_running_stats == self.teacher_bn_running_stats
+                    if m.track_running_stats != self.teacher_bn_running_stats:
+                        raise RuntimeError(
+                            f"Teacher BatchNorm track_running_stats={m.track_running_stats} "
+                            f"does not match expected={self.teacher_bn_running_stats}"
+                        )
 
         return
 
@@ -398,7 +402,7 @@ class InterpolationConsistencyLoss(nn.Module):
         # new parameters
         zipped_params = zip(self.teacher.parameters(), model.parameters())
         for teacher_param, model_param in zipped_params:
-            (teacher_param.data.mul_(alpha).add_(1 - alpha, model_param.data))
+            (teacher_param.data.mul_(alpha).add_(model_param.data, alpha=1 - alpha))
         return
 
     def __call__(
@@ -483,7 +487,8 @@ class InterpolationConsistencyLoss(nn.Module):
         mixed_output = F.softmax(
             model(mixed_sample["input"]),
         )
-        assert mixed_output.requires_grad
+        if not mixed_output.requires_grad:
+            raise RuntimeError("mixed_output does not require grad")
 
         # set outputs as attributes for later access
         self.mixed_output = mixed_output
@@ -1775,7 +1780,8 @@ class StructuredSparsity(object):
             # if the prior_matrix was provided, always prefer it.
             self.prior_matrix = prior_matrix
 
-        assert self.prior_matrix is not None
+        if self.prior_matrix is None:
+            raise ValueError("prior_matrix must be set, either via argument or gene sets")
         return
 
     def _set_prior_matrix_from_gene_sets(

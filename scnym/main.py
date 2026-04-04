@@ -28,20 +28,6 @@ from .losses import scNymCrossEntropy
 from .predict import Predicter
 from . import utils
 
-# allow tensorboard outputs even though TF2 is installed
-# TF2 broke the tensorboard/pytorch API, so we need to alias
-# the old API endpoint below
-try:
-    import tensorflow as tf
-    tfv = int(tf.__version__.split(".")[0])
-except ImportError:
-    print("tensorflow is not installed, assuming tensorboard is independent")
-    tfv = 1
-
-if tfv > 1:
-    import tensorboard as tb
-
-    tf.io.gfile = tb.compat.tensorflow_stub.io.gfile
 
 
 logger = logging.getLogger(__name__)
@@ -83,7 +69,7 @@ def repeater(data_loader):
 
 
 def fit_model(
-    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    X: Union[np.ndarray, sparse.csr_matrix],
     y: np.ndarray,
     traintest_idx: Union[np.ndarray, tuple],
     val_idx: np.ndarray,
@@ -705,7 +691,7 @@ def fit_model(
 
 
 def train_cv(
-    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    X: Union[np.ndarray, sparse.csr_matrix],
     y: np.ndarray,
     batch_size: int,
     n_epochs: int,
@@ -821,7 +807,7 @@ def train_cv(
 
 
 def train_all(
-    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    X: Union[np.ndarray, sparse.csr_matrix],
     y: np.ndarray,
     batch_size: int,
     n_epochs: int,
@@ -930,7 +916,7 @@ def train_all(
 
 
 def train_tissue_independent_cv(
-    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    X: Union[np.ndarray, sparse.csr_matrix],
     metadata: pd.DataFrame,
     out_path: str,
     balanced_classes: bool = False,
@@ -1055,7 +1041,7 @@ def train_tissue_independent_cv(
 
 
 def train_one_tissue_cv(
-    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    X: Union[np.ndarray, sparse.csr_matrix],
     metadata: pd.DataFrame,
     out_path: str,
     balanced_classes: bool = False,
@@ -1171,7 +1157,7 @@ def train_one_tissue_cv(
 
 
 def predict_cell_types(
-    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    X: Union[np.ndarray, sparse.csr_matrix],
     model_path: str,
     out_path: str,
     upper_groups: Union[list, np.ndarray] = None,
@@ -1182,7 +1168,7 @@ def predict_cell_types(
 
     Parameters
     ----------
-    X : np.ndarray, sparse.csr.csr_matrix
+    X : np.ndarray, sparse.csr_matrix
         [Cells, Genes] of log1p transformed, normalized values.
         log1p and normalization performed using scanpy defaults.
     model_path : str
@@ -1248,7 +1234,7 @@ def predict_cell_types(
 
 def load_data(
     path: str,
-) -> Union[np.ndarray, sparse.csr.csr_matrix]:
+) -> Union[np.ndarray, sparse.csr_matrix]:
     """Load a counts matrix from a file path.
 
     Parameters
@@ -1557,7 +1543,7 @@ def main():
         if args.ssl_config is not None:
             print(f"Loading Semi-Supervised Learning parameters for {args.ssl_method}")
             with open(args.ssl_config, "r") as f:
-                ssl_kwargs = yaml.load(f, Loader=yaml.Loader)
+                ssl_kwargs = yaml.safe_load(f)
             print("SSL kwargs:")
             for k, v in ssl_kwargs.items():
                 print(f"{k}\t\t:\t\t{v}")
@@ -1586,7 +1572,7 @@ def main():
         if args.unlabeled_domain is not None:
             unlabeled_domain = np.loadtxt(
                 args.unlabeled_domain,
-            ).astype(np.int)
+            ).astype(int)
         else:
             unlabeled_domain = None
     else:

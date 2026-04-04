@@ -12,6 +12,7 @@ atlas2target() downloads preprocessed reference datasets and concatenates
 them onto a user supplied target dataset.
 """
 from typing import Optional, Union, List, Tuple
+import anndata
 from anndata import AnnData
 import scanpy as sc
 import numpy as np
@@ -437,7 +438,7 @@ def scnym_train(
         # set all samples for training
         train_adata = adata
         # set no samples as `target_bidx`
-        target_bidx = np.zeros(adata.shape[0], dtype=np.bool)
+        target_bidx = np.zeros(adata.shape[0], dtype=bool)
     else:
         print(f"{n_unlabeled} unlabeled observations found.")
         print(
@@ -583,7 +584,8 @@ def scnym_train(
         "traintest_idx": traintest_idx,
         "val_idx": val_idx,
     }
-    assert osp.exists(results["model_path"])
+    if not osp.exists(results["model_path"]):
+        raise FileNotFoundError(f"Model path not found: {results['model_path']}")
 
     adata.uns["scNym_train_results"] = results
 
@@ -909,8 +911,8 @@ def atlas2target(
         logger.info(msg)
 
     # join the target and atlas data
-    joint_adata = atlas.concatenate(
-        adata,
+    joint_adata = anndata.concat(
+        [atlas, adata],
         join="inner",
     )
 

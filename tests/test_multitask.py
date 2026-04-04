@@ -23,7 +23,7 @@ def test_multitask_mixmatch():
     adata = sc.datasets.pbmc3k()
     sc.pp.filter_cells(adata, min_counts=100)
     sc.pp.filter_genes(adata, min_cells=100)
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
 
     # generate fake class labels
@@ -133,7 +133,7 @@ def test_multitask_dan():
     adata = sc.datasets.pbmc3k()
     sc.pp.filter_cells(adata, min_counts=100)
     sc.pp.filter_genes(adata, min_cells=100)
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
 
     # create dataloaders
@@ -196,7 +196,7 @@ def test_multitask_trainer():
     sc.pp.pca(adata)
     sc.pp.neighbors(adata, n_neighbors=15)
     # generate clusters to use as class labels
-    sc.tl.leiden(adata, resolution=0.5, key_added="leiden")
+    sc.tl.leiden(adata, resolution=0.5, key_added="leiden", flavor="igraph", n_iterations=2)
     adata.obs["class"] = pd.Categorical(
         adata.obs["leiden"],
     ).codes
