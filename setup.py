@@ -2,13 +2,15 @@ from pathlib import Path
 
 from setuptools import setup, find_packages
 
+_here = Path(__file__).resolve().parent
+
 try:
     from scnym import __author__, __email__
 except ImportError:  # Deps not yet installed
     __author__ = __email__ = ''
 
 # Single source of truth for version
-_version = Path('VERSION').read_text('utf-8').strip()
+_version = (_here / 'VERSION').read_text('utf-8').strip()
 
 setup(
     name='scnym',
@@ -22,7 +24,7 @@ setup(
     python_requires='>=3.10',
     install_requires=[
         l.strip() for l in
-        Path('requirements.txt').read_text('utf-8').splitlines()
+        (_here / 'requirements.txt').read_text('utf-8').splitlines()
         if l.strip()
     ],
     extras_require={

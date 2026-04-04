@@ -128,9 +128,9 @@ def test_assumption_checking():
     var_names_with_dups[-1] = var_names_with_dups[-2]
     try:
         adata_dup_genes.var_names = var_names_with_dups
-    except Exception:
+    except ValueError as exc:
         # anndata >= 0.11 rejects duplicate var_names at assignment
-        pass
+        assert "duplicate" in str(exc).lower() or "unique" in str(exc).lower()
     else:
         # older anndata accepted duplicates; scnym should catch them
         with pytest.raises(ValueError, match="Duplicate Genes"):
