@@ -14,7 +14,7 @@ def _load_10x_pbmc():
     adata = sc.datasets.pbmc3k()
     sc.pp.filter_cells(adata, min_counts=100)
     sc.pp.filter_genes(adata, min_cells=100)
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
     sc.pp.highly_variable_genes(adata, n_top_genes=3000)
     sc.pp.pca(adata)

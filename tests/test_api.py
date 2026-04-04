@@ -121,23 +121,27 @@ def test_assumption_checking():
     )
     adata = adata[ridx, :].copy()
 
-    # test that an input anndata with duplicate genes
-    # throws an error
+    # test that duplicate genes are rejected — either by anndata
+    # (>= 0.11 raises at assignment) or by scnym's own check
     adata_dup_genes = adata.copy()
-    var_names_with_dups = np.array(adata_dup_genes.var_names)
+    var_names_with_dups = np.array(adata_dup_genes.var_names).copy()
     var_names_with_dups[-1] = var_names_with_dups[-2]
-    adata_dup_genes.var_names = var_names_with_dups
-
-    with pytest.raises(ValueError, match="Duplicate Genes"):
-        # this should throw an error about duplicate genes
-        config = {"n_epochs": 1}
-        scnym_api(
-            adata=adata_dup_genes,
-            task="train",
-            groupby="cell",
-            out_path=str(sc.settings.datasetdir),
-            config=config,
-        )
+    try:
+        adata_dup_genes.var_names = var_names_with_dups
+    except Exception:
+        # anndata >= 0.11 rejects duplicate var_names at assignment
+        pass
+    else:
+        # older anndata accepted duplicates; scnym should catch them
+        with pytest.raises(ValueError, match="Duplicate Genes"):
+            config = {"n_epochs": 1}
+            scnym_api(
+                adata=adata_dup_genes,
+                task="train",
+                groupby="cell",
+                out_path=str(sc.settings.datasetdir),
+                config=config,
+            )
 
     # test that an input anndata with `.X` formatted as something
     # other than log1p(CPM) will throw an error

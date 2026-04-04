@@ -82,7 +82,7 @@ def test_mixmatch_forward():
     adata = sc.datasets.pbmc3k()
     sc.pp.filter_cells(adata, min_counts=100)
     sc.pp.filter_genes(adata, min_cells=100)
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
 
     # generate fake class labels
@@ -181,7 +181,7 @@ def test_mixmatch_forward_with_confthresh():
     adata = sc.datasets.pbmc3k()
     sc.pp.filter_cells(adata, min_counts=100)
     sc.pp.filter_genes(adata, min_cells=100)
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
 
     # generate fake class labels
@@ -343,7 +343,7 @@ def test_mixmatch_forward_with_teacher_bn_runnning_stats():
     adata = sc.datasets.pbmc3k()
     sc.pp.filter_cells(adata, min_counts=100)
     sc.pp.filter_genes(adata, min_cells=100)
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
 
     # generate fake class labels
@@ -435,7 +435,7 @@ def test_train_mixmatch():
     adata = sc.datasets.pbmc3k()
     sc.pp.filter_cells(adata, min_counts=100)
     sc.pp.filter_genes(adata, min_cells=100)
-    sc.pp.normalize_per_cell(adata, counts_per_cell_after=1e6)
+    sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
 
     # generate fake class labels
