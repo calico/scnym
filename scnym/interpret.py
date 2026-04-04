@@ -241,7 +241,7 @@ class Salience(object):
             msg = f"{target_class} is not in `.class_names`"
             raise ValueError(msg)
 
-        target_idx = np.where(target_class == self.class_names)[0].astype(np.int)
+        target_idx = np.where(target_class == self.class_names)[0].astype(int)
         target_idx = int(target_idx)
 
         self.model.zero_grad()
@@ -297,7 +297,7 @@ class Salience(object):
         s = self.get_saliency(**kwargs)
         sort_idx = torch.argsort(s)
         idx = sort_idx[0].numpy()[::-1]
-        return self.gene_names[idx.astype(np.int)]
+        return self.gene_names[idx.astype(int)]
 
 
 class IntegratedGradient(object):
@@ -709,7 +709,7 @@ class IntegratedGradient(object):
             raise ValueError(msg)
 
         # get the indices for cells of the target class
-        cell_idx = np.where(adata.obs[groupby] == target_class)[0].astype(np.int)
+        cell_idx = np.where(adata.obs[groupby] == target_class)[0].astype(int)
         if n_cells is not None:
             if n_cells < len(cell_idx):
                 # subset if a specific number of cells was specified
@@ -1033,7 +1033,7 @@ class ExpectedGradient(object):
 
         target_bidx = adata.obs[self.cell_type_col] == target
         if source in self.background_vals:
-            source_bidx = np.ones(adata.shape[0], dtype=np.bool)
+            source_bidx = np.ones(adata.shape[0], dtype=bool)
             # ensure target cells aren't in the source data
             source_bidx[target_bidx] = False
         else:

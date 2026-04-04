@@ -30,9 +30,9 @@ class SingleCellDS(Dataset):
 
     def __init__(
         self,
-        X: Union[sparse.csr.csr_matrix, np.ndarray],
-        y: Union[sparse.csr.csr_matrix, np.ndarray],
-        domain: Union[sparse.csr.csr_matrix, np.ndarray] = None,
+        X: Union[sparse.csr_matrix, np.ndarray],
+        y: Union[sparse.csr_matrix, np.ndarray],
+        domain: Union[sparse.csr_matrix, np.ndarray] = None,
         transform: Callable = None,
         num_classes: int = -1,
         num_domains: int = -1,
@@ -139,7 +139,7 @@ class SingleCellDS(Dataset):
         # retrieve relevant sample vector and associated label
         # store in a hash table for later manipulation and retrieval
 
-        # input_ is either an `np.ndarray` or `sparse.csr.csr_matrix`
+        # input_ is either an `np.ndarray` or `sparse.csr_matrix`
         input_ = self.X[idx, ...]
         # label is already a `torch.Tensor`
         label = self.y[idx]
@@ -365,7 +365,7 @@ class MultinomialSample(object):
         if self.depth_ratio is None:
             # tile the specified depth for all cells
             depth = np.tile(np.array(self.depth).reshape(1, -1), (x.size(0), 1)).astype(
-                np.int
+                int
             )
         else:
             # compute a range of depths based on the library size
@@ -376,7 +376,7 @@ class MultinomialSample(object):
                     np.ceil(self.depth_ratio[1] * size).reshape(-1, 1),
                 ],
                 axis=1,
-            ).astype(np.int)
+            ).astype(int)
 
         # sample from a multinomial
         # np.random.multinomial is ~100X faster than the native
@@ -384,12 +384,10 @@ class MultinomialSample(object):
         m = np.zeros(x.size())
         for i in range(x.size(0)):
 
-            d = int(
-                np.random.choice(
-                    np.arange(depth[i, 0], depth[i, 1]),
-                    size=1,
-                )
-            )
+            d = np.random.choice(
+                np.arange(depth[i, 0], depth[i, 1]),
+                size=1,
+            ).item()
 
             m[i, :] = np.random.multinomial(
                 d,
@@ -460,7 +458,7 @@ class GeneMasking(object):
                 np.arange(n_genes),
                 size=int(np.floor(n_genes * p_drop)),
                 replace=False,
-            ).astype(np.int)
+            ).astype(int)
             x[i, idx] = 0
 
         sample["input"] = x

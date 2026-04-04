@@ -80,15 +80,15 @@ def l1_layer0(
 
 
 def append_categorical_to_data(
-    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    X: Union[np.ndarray, sparse.csr_matrix],
     categorical: np.ndarray,
-) -> (Union[np.ndarray, sparse.csr.csr_matrix], np.ndarray):
+) -> (Union[np.ndarray, sparse.csr_matrix], np.ndarray):
     """Convert `categorical` to a one-hot vector and append
     this vector to each sample in `X`.
 
     Parameters
     ----------
-    X : np.ndarray, sparse.csr.csr_matrix
+    X : np.ndarray, sparse.csr_matrix
         [Cells, Features]
     categorical : np.ndarray
         [Cells,]
@@ -126,7 +126,7 @@ def append_categorical_to_data(
 
 def get_adata_asarray(
     adata: anndata.AnnData,
-) -> Union[np.ndarray, sparse.csr.csr_matrix]:
+) -> Union[np.ndarray, sparse.csr_matrix]:
     """Get the gene expression matrix `.X` of an
     AnnData object as an array rather than a view.
 
@@ -137,7 +137,7 @@ def get_adata_asarray(
 
     Returns
     -------
-    X : np.ndarray, sparse.csr.csr_matrix
+    X : np.ndarray, sparse.csr_matrix
         [Cells, Genes] `.X` attribute as an array
         in memory.
 
@@ -146,18 +146,18 @@ def get_adata_asarray(
     Returned `X` will match the type of `adata.X` view.
     """
     if sparse.issparse(adata.X):
-        X = sparse.csr.csr_matrix(adata.X)
+        X = sparse.csr_matrix(adata.X)
     else:
         X = np.array(adata.X)
     return X
 
 
 def build_classification_matrix(
-    X: Union[np.ndarray, sparse.csr.csr_matrix],
+    X: Union[np.ndarray, sparse.csr_matrix],
     model_genes: np.ndarray,
     sample_genes: np.ndarray,
     gene_batch_size: int = 512,
-) -> Union[np.ndarray, sparse.csr.csr_matrix]:
+) -> Union[np.ndarray, sparse.csr_matrix]:
     """
     Build a matrix for classification using only genes that overlap
     between the current sample and the pre-trained model.
@@ -182,7 +182,7 @@ def build_classification_matrix(
         as zeros. `type(N)` will match `type(X)`.
     """
     # check types
-    if type(X) not in (np.ndarray, sparse.csr.csr_matrix):
+    if type(X) not in (np.ndarray, sparse.csr_matrix):
         msg = f"X is type {type(X)}, must `np.ndarray` or `sparse.csr_matrix`"
         raise TypeError(msg)
     n_cells = X.shape[0]
@@ -211,7 +211,7 @@ def build_classification_matrix(
     common_genes = 0
     for i, g in tqdm.tqdm(enumerate(sample_genes), desc="mapping genes"):
         if np.sum(g == model_genes) > 0:
-            model_genes_indices.append(int(np.where(g == model_genes)[0]))
+            model_genes_indices.append(np.where(g == model_genes)[0].item())
             sample_genes_indices.append(
                 i,
             )
@@ -396,7 +396,7 @@ class RBFWeight(object):
         self,
         distances: np.ndarray,
     ) -> np.ndarray:
-        """Generate a set of weights based on distances to a point
+        r"""Generate a set of weights based on distances to a point
         with a radial basis function kernel.
 
         Parameters
@@ -667,13 +667,13 @@ from sklearn.metrics import calinski_harabasz_score
 def _optimize_clustering(adata, resolution: list = [0.1, 0.2, 0.3, 0.5, 1.0]):
     scores = []
     for r in resolution:
-        sc.tl.leiden(adata, resolution=r)
+        sc.tl.leiden(adata, resolution=r, flavor="igraph", n_iterations=2)
         s = calinski_harabasz_score(adata.obsm["X_scnym"], adata.obs["leiden"])
         scores.append(s)
     cl_opt_df = pd.DataFrame({"resolution": resolution, "score": scores})
     best_idx = np.argmax(cl_opt_df["score"])
     res = cl_opt_df.iloc[best_idx, 0]
-    sc.tl.leiden(adata, resolution=res)
+    sc.tl.leiden(adata, resolution=res, flavor="igraph", n_iterations=2)
     print("Best resolution: ", res)
     return cl_opt_df
 

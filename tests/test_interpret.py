@@ -19,13 +19,13 @@ def _load_10x_pbmc():
     sc.pp.highly_variable_genes(adata, n_top_genes=3000)
     sc.pp.pca(adata)
     sc.pp.neighbors(adata, n_neighbors=15)
-    sc.tl.leiden(adata, resolution=0.3)
+    sc.tl.leiden(adata, resolution=0.3, flavor="igraph", n_iterations=2)
     # name one class T cell and one B cell
     cd4 = adata.obs_vector("CD4")
     cd22 = adata.obs_vector("CD22")
     leiden = adata.obs_vector("leiden")
     tmp = pd.DataFrame({"CD4": cd4, "CD22": cd22, "leiden": leiden})
-    grp = tmp.groupby("leiden").mean().reset_index()
+    grp = tmp.groupby("leiden", observed=True).mean().reset_index()
     print(grp)
     t_cell_cl = grp.sort_values("CD4", ascending=False)["leiden"].tolist()[0]
     b_cell_cl = grp.sort_values("CD22", ascending=False)["leiden"].tolist()[0]

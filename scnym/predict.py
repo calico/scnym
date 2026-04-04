@@ -106,7 +106,7 @@ class Predicter(object):
 
     def predict(
         self,
-        X: Union[np.ndarray, sparse.csr.csr_matrix, torch.FloatTensor],
+        X: Union[np.ndarray, sparse.csr_matrix, torch.FloatTensor],
         output: str = None,
         batch_size: int = 1024,
         **kwargs,
@@ -116,7 +116,7 @@ class Predicter(object):
 
         Parameters
         ----------
-        X : np.ndarray, sparse.csr.csr_matrix, torch.FloatTensor
+        X : np.ndarray, sparse.csr_matrix, torch.FloatTensor
             [Cells, Genes]
         output : str
             additional output to include as an optional third tuple.

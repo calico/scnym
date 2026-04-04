@@ -3,3 +3,7 @@ dist/
 .ipynb_checkpoints/
 build/
 *.egg-info/
+.claude
+CLAUDE.md
+data/
+tmp/

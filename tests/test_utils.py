@@ -34,7 +34,7 @@ def test_build_classification_matrix_dense():
 
     # X should have the genes of B in the order of A
     for i, g in enumerate(A_genes):
-        j = int(np.where(B_genes == g)[0])
+        j = np.where(B_genes == g)[0].item()
         assert np.all(X[:, i] == B[:, j])
     return
 
@@ -68,7 +68,7 @@ def test_build_classification_matrix_sparse():
 
     # X should have the genes of B in the order of A
     for i, g in enumerate(A_genes):
-        j = int(np.where(B_genes == g)[0])
+        j = np.where(B_genes == g)[0].item()
         assert np.all(X[:, i].toarray() == B[:, j].toarray())
     return
 
@@ -78,7 +78,7 @@ def test_get_adata_asarray():
     # test getting a dense matrix
     import scnym
 
-    adata = anndata.AnnData(X=np.random.random((100, 100)))
+    adata = anndata.AnnData(X=np.random.random((100, 100)).astype(np.float32))
     X = scnym.utils.get_adata_asarray(adata=adata)
     assert type(X) == np.ndarray
 
@@ -87,7 +87,7 @@ def test_get_adata_asarray():
     ridx = np.random.choice(A.size, size=1000, replace=True)
     A.flat[ridx] = 1
     A = sparse.csr_matrix(A)
-    adata = anndata.AnnData(X=A)
+    adata = anndata.AnnData(X=A.astype(np.float32))
     X = scnym.utils.get_adata_asarray(adata=adata)
     assert sparse.issparse(X)
     return

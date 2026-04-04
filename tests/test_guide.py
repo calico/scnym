@@ -107,7 +107,7 @@ def test_sparsity_loss():
     sc.pp.pca(adata)
     sc.pp.neighbors(adata, n_neighbors=15)
     # generate clusters to use as class labels
-    sc.tl.leiden(adata, resolution=0.5, key_added="leiden")
+    sc.tl.leiden(adata, resolution=0.5, key_added="leiden", flavor="igraph", n_iterations=2)
 
     adata.obs["class"] = pd.Categorical(
         adata.obs["leiden"],
@@ -287,7 +287,7 @@ def test_nonneg_guide():
     sc.pp.pca(adata)
     sc.pp.neighbors(adata, n_neighbors=15)
     # generate clusters to use as class labels
-    sc.tl.leiden(adata, resolution=0.5, key_added="leiden")
+    sc.tl.leiden(adata, resolution=0.5, key_added="leiden", flavor="igraph", n_iterations=2)
 
     adata.obs["class"] = pd.Categorical(
         adata.obs["leiden"],

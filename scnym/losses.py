@@ -398,7 +398,7 @@ class InterpolationConsistencyLoss(nn.Module):
         # new parameters
         zipped_params = zip(self.teacher.parameters(), model.parameters())
         for teacher_param, model_param in zipped_params:
-            (teacher_param.data.mul_(alpha).add_(1 - alpha, model_param.data))
+            (teacher_param.data.mul_(alpha).add_(model_param.data, alpha=1 - alpha))
         return
 
     def __call__(
