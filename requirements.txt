@@ -8,7 +8,6 @@ numba==0.60.*
 numpy==1.26.*
 numpy-groupies==0.10.*
 pandas==2.2.*
-pytest==7.4.*
 python-dateutil==2.8.*
 PyYAML==5.3.*
 requests==2.26.*

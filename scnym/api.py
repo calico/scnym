@@ -584,7 +584,8 @@ def scnym_train(
         "traintest_idx": traintest_idx,
         "val_idx": val_idx,
     }
-    assert osp.exists(results["model_path"])
+    if not osp.exists(results["model_path"]):
+        raise FileNotFoundError(f"Model path not found: {results['model_path']}")
 
     adata.uns["scNym_train_results"] = results
 

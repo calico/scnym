@@ -1543,7 +1543,7 @@ def main():
         if args.ssl_config is not None:
             print(f"Loading Semi-Supervised Learning parameters for {args.ssl_method}")
             with open(args.ssl_config, "r") as f:
-                ssl_kwargs = yaml.load(f, Loader=yaml.Loader)
+                ssl_kwargs = yaml.safe_load(f)
             print("SSL kwargs:")
             for k, v in ssl_kwargs.items():
                 print(f"{k}\t\t:\t\t{v}")

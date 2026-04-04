@@ -91,17 +91,17 @@ First, clone the repository:
 
 We recommend creating a virtual environment for use with `scNym`. 
 This is easily accomplished using `virtualenv` or `conda`.
-We recommend using `python=3.8` for `scNym`, as some of our dependencies don't currently support the newest Python versions.
+We recommend using `python=3.10` or newer for `scNym`.
 
 ```bash
-$ python3 -m venv scnym_env # python3 is python3.8
+$ python3 -m venv scnym_env
 $ source scnym_env/bin/activate
 ```
 
 or 
 
 ```bash
-$ conda create -n scnym_env -c conda-forge python=3.8
+$ conda create -n scnym_env -c conda-forge python=3.10
 $ conda activate scnym_env
 ```
 
